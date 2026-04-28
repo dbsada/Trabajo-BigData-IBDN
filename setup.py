@@ -5,6 +5,9 @@ import socket
 import time
 from enum import Enum
 import rich
+from rich.prompt import Prompt, Confirm
+from rich.panel import Panel
+from rich.console import Console
 from typing import Literal
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -23,8 +26,6 @@ class ClusterManager:
       process = subprocess.run(command, shell=True, cwd=cwd, capture_output=True, text=True)
       
       if process.returncode != 0:
-        from rich.panel import Panel
-        from rich.console import Console
         console = Console()
         
         # Recopilamos el error de donde venga
@@ -117,9 +118,19 @@ class ClusterManager:
 
 def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
   manager = ClusterManager()
+
+  if not os.path.exists(os.path.join(manager.project_home, 'models/sklearn_regressor.pkl')):
+    if not os.path.exists(os.path.join(manager.project_home, 'models')):
+      os.makedirs(os.path.join(manager.project_home, 'models'))
+    manager.run_local_script('train_model.py')
   
   manager.docker.start_services(db=db)
   manager.docker.kafka.create_topic("test-topic")
+
+
+
+
+
 
   rich.print("\n[bold green]🚀 SISTEMAS OPERATIVOS EN MODO DOCKER[/bold green]")
   rich.print("─" * 40)
@@ -153,5 +164,35 @@ def main_kubernetes(db: Literal['mongo', 'cassandra']):
   raise NotImplementedError('Función main_kubernetes no implementada aún.')
 
 if __name__ == '__main__':
-  main_docker(db='mongo')
-  # main_kubernetes(db='mongo')
+  console = Console()
+  
+  os.system('clear') 
+
+  rich.print("[bold cyan]╔════════════════════════════════════════════╗[/bold cyan]")
+  rich.print("[bold cyan]║      IBDN CLUSTER ORCHESTRATOR v1.0        ║[/bold cyan]")
+  rich.print("[bold cyan]╚════════════════════════════════════════════╝[/bold cyan]\n")
+
+  # 1. Selección de Infraestructura (Letra rápida)
+  infra_choice = Prompt.ask(
+    "Modo: [[b]D[/b]]ocker o [[b]K[/b]]ubernetes?",
+    choices=["d", "k"],
+    default="d"
+  ).lower()
+  
+  infra = "docker" if infra_choice == "d" else "kubernetes"
+
+  # 2. Selección de Base de Datos (Letra rápida)
+  db_choice = Prompt.ask(
+    "DB:   [[b]M[/b]]ongoDB o [[b]C[/b]]assandra?",
+    choices=["m", "c"],
+    default="m"
+  ).lower()
+  
+  db = "mongo" if db_choice == "m" else "cassandra"
+
+  rich.print(f"\n[bold green]🚀 Configuración aceptada:[/bold green] [white]{infra} + {db}[/white]\n")
+
+  if infra == "docker":
+    main_docker(db=db)
+  elif infra == "kubernetes":
+    main_kubernetes(db=db)

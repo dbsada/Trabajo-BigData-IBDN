@@ -40,30 +40,3 @@ sudo apt install -y docker.io docker-compose-plugin
 sudo apt install -y python3 python3-pip
 sudo apt install -y python3-venv
 ```
-
-#### Instalar herramientas via SDKMAN 
-```sh
-sudo apt install zip -y
-sudo apt install unzip -y
-curl -s "https://get.sdkman.io" | bash
-source "$HOME/.sdkman/bin/sdkman-init.sh"
-```
-
-```sh
-sdk install java 17.0.14-amzn
-sdk install spark 4.1.1
-sdk install scala 2.13.0
-sdk install sbt
-```
-
-#### Instalar Kafka
-Se instala desde la [página oficial de Apache Kafka](https://kafka.apache.org/community/downloads/). La versión utilizada es la [4.2.0 con Scala 2.13](https://www.apache.org/dyn/closer.lua/kafka/4.2.0/kafka_2.13-4.2.0.tgz?action=download).
-
-```sh
-chmod +x /home/ibdn/ibdn/kafka_2.13-4.2.0/bin/*.sh
-```
-
-## Dockerizado
-
-
-## K8s
