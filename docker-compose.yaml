@@ -43,6 +43,9 @@ services:
     ports:
       - "8080:8080"
       - "7077:7077"
+    volumes:
+      - .:/app
+    working_dir: /app
 
   python:
     build:

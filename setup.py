@@ -67,13 +67,16 @@ class ClusterManager:
   class DockerMode:
     def __init__(self, manager):
       self.m = manager
+      self.mongo = self.Mongo(manager)
+      self.cassandra = self.Cassandra(manager)
+      self.spark = self.Spark(manager)
       self.kafka = self.Kafka(manager)
     
     def start_services(self, db: Literal['mongo', 'cassandra']):
       logging.info('🚀 Iniciando servicios con Docker Compose...')
       self.m._run_command(f'docker compose --profile db_{db} up -d', cwd=self.m.project_home)
       
-      self.m._wait_for_port(9092) # Kafka
+      self.m._wait_for_port(9092)
       logging.info('Kafka está listo.')
 
       if db == 'mongo':
@@ -88,7 +91,7 @@ class ClusterManager:
         logging.error(f'Base de datos no soportada: {db}')
         raise ValueError(f'Base de datos no soportada: {db}')
 
-      self.m._wait_for_port(8080) # Spark Master
+      self.m._wait_for_port(8080)
       logging.info('Spark Master está listo.')
 
     def show_service_logs(self, service_name: str):
@@ -97,6 +100,33 @@ class ClusterManager:
         '''        
         cmd = f"docker compose logs {service_name} | less -S +G"
         subprocess.run(cmd, shell=True)
+
+    class Mongo:
+      def __init__(self, manager):
+        self.m = manager
+
+      def import_distances(self):
+        logging.info("📊 Importando distancias a MongoDB...")
+        return self.m.run_local_script('import_distances.py')
+
+    class Cassandra:
+      def __init__(self, manager):
+        self.m = manager
+
+      def import_distances(self):
+        logging.info("📊 Importando distancias a Cassandra...")
+        raise NotImplementedError('Importación a Cassandra no implementada aún.')
+
+    class Spark:
+      def __init__(self, manager):
+        self.m = manager
+        self.container_name = 'spark'
+
+      def train_model(self):
+        logging.info("🧠 Iniciando entrenamiento Spark MLlib...")
+        cmd = f"docker exec -it {self.container_name} python3 scripts/train.py ."
+        
+        return self.m._run_command(cmd)
 
     class Kafka:
       def __init__(self, manager):
@@ -119,15 +149,19 @@ class ClusterManager:
 def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
   manager = ClusterManager()
 
-  if not os.path.exists(os.path.join(manager.project_home, 'models/sklearn_regressor.pkl')):
-    if not os.path.exists(os.path.join(manager.project_home, 'models')):
-      os.makedirs(os.path.join(manager.project_home, 'models'))
-    manager.run_local_script('train_model.py')
+  manager.run_local_script('download_data.py')
   
   manager.docker.start_services(db=db)
-  manager.docker.kafka.create_topic("flight-delay-ml-request")
 
-  rich.print("\n[bold green]🚀 SISTEMAS OPERATIVOS EN MODO DOCKER[/bold green]")
+  if db == 'mongo':
+    manager.docker.mongo.import_distances()
+  elif db == 'cassandra':
+    manager.docker.cassandra.import_distances()
+  
+  manager.docker.kafka.create_topic("flight-delay-ml-request")
+  # manager.docker.spark.train_model()
+
+  rich.print("\n[bold green]🚀  SERVICIOS:[/bold green]")
   rich.print("─" * 40)
   rich.print("[bold cyan]k[/bold cyan] -> Ver logs de [bold]Kafka[/bold] (Full scroll)")
   rich.print("[bold magenta]s[/bold magenta] -> Ver logs de [bold]Spark[/bold] (Full scroll)")

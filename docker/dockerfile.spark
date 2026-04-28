@@ -2,13 +2,24 @@ FROM eclipse-temurin:17-jdk
 
 ENV SPARK_VERSION=4.1.1
 
-RUN apt-get update && apt-get install -y curl tar && \
-    curl -L https://downloads.apache.org/spark/spark-$SPARK_VERSION/spark-$SPARK_VERSION-bin-hadoop3.tgz \
+# 1. Instalamos herramientas base y PYTHON
+RUN apt-get update && apt-get install -y \
+    curl \
+    tar \
+    python3 \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. Descargamos e instalamos Spark
+RUN curl -L https://downloads.apache.org/spark/spark-$SPARK_VERSION/spark-$SPARK_VERSION-bin-hadoop3.tgz \
     | tar -xz -C /opt && \
     mv /opt/spark-$SPARK_VERSION-bin-hadoop3 /opt/spark
 
+RUN pip3 install numpy pyspark findspark --break-system-packages
+
 ENV PATH="/opt/spark/bin:$PATH"
+WORKDIR /app
 
 EXPOSE 8080 7077
 
-CMD ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master", "--ip", "0.0.0.0"]
+CMD ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master", "--host", "0.0.0.0"]
