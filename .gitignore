@@ -139,9 +139,9 @@ cython_debug/
 docker-compose.override.yaml
 
 # Data folders
-/data
+/data/*
+/models/*
 !/data/.gitkeep
-/models
 !/models/.gitkeep
 
 # Ignore logs and temp files
