@@ -8,6 +8,7 @@ import rich
 from rich.prompt import Prompt, Confirm
 from rich.panel import Panel
 from rich.console import Console
+import questionary
 from typing import Literal
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -42,7 +43,6 @@ class ClusterManager:
       logging.info(f'Éxito: {command}')
       return process.stdout
     else:
-      # Lógica para Popen...
       log_name = f'{command.split("/")[-1].split(" ")[0]}.log'
       log_file = open(log_name, 'w')
       logging.info(f'Lanzando servicio en segundo plano: {command} (Log: {log_name})')
@@ -125,12 +125,7 @@ def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
     manager.run_local_script('train_model.py')
   
   manager.docker.start_services(db=db)
-  manager.docker.kafka.create_topic("test-topic")
-
-
-
-
-
+  manager.docker.kafka.create_topic("flight-delay-ml-request")
 
   rich.print("\n[bold green]🚀 SISTEMAS OPERATIVOS EN MODO DOCKER[/bold green]")
   rich.print("─" * 40)
@@ -164,35 +159,36 @@ def main_kubernetes(db: Literal['mongo', 'cassandra']):
   raise NotImplementedError('Función main_kubernetes no implementada aún.')
 
 if __name__ == '__main__':
-  console = Console()
-  
-  os.system('clear') 
+    console = Console()
+    
+    console.print("[bold cyan]╔════════════════════════════════════════════╗[/bold cyan]")
+    console.print("[bold cyan]║      IBDN CLUSTER ORCHESTRATOR v1.0        ║[/bold cyan]")
+    console.print("[bold cyan]╚════════════════════════════════════════════╝[/bold cyan]\n")
 
-  rich.print("[bold cyan]╔════════════════════════════════════════════╗[/bold cyan]")
-  rich.print("[bold cyan]║      IBDN CLUSTER ORCHESTRATOR v1.0        ║[/bold cyan]")
-  rich.print("[bold cyan]╚════════════════════════════════════════════╝[/bold cyan]\n")
+    infra = questionary.select(
+        "¿Qué infraestructura deseas usar?",
+        choices=[
+            "Docker",
+            "Kubernetes"
+        ],
+        default="Docker"
+    ).ask()
 
-  # 1. Selección de Infraestructura (Letra rápida)
-  infra_choice = Prompt.ask(
-    "Modo: [[b]D[/b]]ocker o [[b]K[/b]]ubernetes?",
-    choices=["d", "k"],
-    default="d"
-  ).lower()
-  
-  infra = "docker" if infra_choice == "d" else "kubernetes"
+    db_choice = questionary.select(
+        "¿Qué base de datos quieres levantar?",
+        choices=[
+            "MongoDB",
+            "Cassandra"
+        ],
+        default="MongoDB"
+    ).ask()
 
-  # 2. Selección de Base de Datos (Letra rápida)
-  db_choice = Prompt.ask(
-    "DB:   [[b]M[/b]]ongoDB o [[b]C[/b]]assandra?",
-    choices=["m", "c"],
-    default="m"
-  ).lower()
-  
-  db = "mongo" if db_choice == "m" else "cassandra"
+    infra_mode = "docker" if "Docker" in infra else "kubernetes"
+    db = "mongo" if "MongoDB" in db_choice else "cassandra"
 
-  rich.print(f"\n[bold green]🚀 Configuración aceptada:[/bold green] [white]{infra} + {db}[/white]\n")
+    console.print(f"\n[bold green]⚙️ Configuración seleccionada:[/bold green] [white]{infra_mode} + {db}[/white]\n")
 
-  if infra == "docker":
-    main_docker(db=db)
-  elif infra == "kubernetes":
-    main_kubernetes(db=db)
+    if infra_mode == "docker":
+      main_docker(db=db)
+    elif infra_mode == "kubernetes":
+      main_kubernetes(db=db)
