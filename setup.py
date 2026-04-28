@@ -13,12 +13,11 @@ class ClusterManager:
   def __init__(self):
     self.home = os.path.expanduser('~')
     self.project_home = os.path.join(self.home, 'ibdn') 
-    self.venv_python = os.path.join(self.project_home, 'env/bin/python3')
+    self.venv_python = os.path.join(self.project_home, '.venv/bin/python3')
 
     self.docker = self.DockerMode(self)
     # self.kubernetes = self.KubernetesMode(self)
 
-  
   def _run_command(self, command, cwd=None, wait=True, start_new_session=False):
     if wait:
       process = subprocess.run(command, shell=True, cwd=cwd, capture_output=True, text=True)
@@ -47,6 +46,10 @@ class ClusterManager:
       log_file = open(log_name, 'w')
       logging.info(f'Lanzando servicio en segundo plano: {command} (Log: {log_name})')
       return subprocess.Popen(command, shell=True, cwd=cwd, stdout=log_file, stderr=log_file, start_new_session=start_new_session)
+
+  def run_local_script(self, script_name):
+    script_path = os.path.join(self.project_home, 'scripts', script_name)
+    return self._run_command(f"{self.venv_python} {script_path}")
 
   def _wait_for_port(self, port, timeout=20):
     '''

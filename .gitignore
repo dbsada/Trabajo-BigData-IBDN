@@ -141,6 +141,8 @@ docker-compose.override.yaml
 # Data folders
 /data
 !/data/.gitkeep
+/models
+!/models/.gitkeep
 
 # Ignore logs and temp files
 *.log

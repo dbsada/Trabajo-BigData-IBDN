@@ -67,5 +67,3 @@ chmod +x /home/ibdn/ibdn/kafka_2.13-4.2.0/bin/*.sh
 
 
 ## K8s
-
-
