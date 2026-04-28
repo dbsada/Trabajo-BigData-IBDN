@@ -1,0 +1,14 @@
+FROM eclipse-temurin:17-jdk
+
+ENV SPARK_VERSION=4.1.1
+
+RUN apt-get update && apt-get install -y curl tar && \
+    curl -L https://downloads.apache.org/spark/spark-$SPARK_VERSION/spark-$SPARK_VERSION-bin-hadoop3.tgz \
+    | tar -xz -C /opt && \
+    mv /opt/spark-$SPARK_VERSION-bin-hadoop3 /opt/spark
+
+ENV PATH="/opt/spark/bin:$PATH"
+
+EXPOSE 8080 7077
+
+CMD ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master", "--ip", "0.0.0.0"]

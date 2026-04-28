@@ -1,0 +1,57 @@
+services:
+  kafka:
+    image: apache/kafka:latest
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_LISTENERS: 'INTERNAL://:9093,EXTERNAL://:9092,CONTROLLER://:9094'
+      KAFKA_ADVERTISED_LISTENERS: 'INTERNAL://kafka:9093,EXTERNAL://localhost:9092'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:9094'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'INTERNAL'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  mongodb:
+    image: mongo:7.0
+    container_name: mongodb
+    profiles: ["db_mongo"]  # <--- Solo sube si pides mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - ./data/mongo:/data/db
+
+  cassandra:
+    image: cassandra:4.1
+    container_name: cassandra
+    profiles: ["db_cassandra"] # <--- Solo sube si pides cassandra
+    ports:
+      - "9042:9042"
+    volumes:
+      - ./data/cassandra:/var/lib/cassandra
+
+  spark:
+    build:
+      context: .
+      dockerfile: docker/dockerfile.spark
+    container_name: spark
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+
+  python:
+    build:
+      context: .
+      dockerfile: docker/dockerfile.python
+    container_name: flask
+    ports:
+      - "5000:5000"
+    depends_on:
+      - kafka
+    volumes:
+      - .:/app
+    environment:
+      - FLASK_ENV=development
