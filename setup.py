@@ -10,8 +10,18 @@ from rich.panel import Panel
 from rich.console import Console
 import questionary
 from typing import Literal
+import requests
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+os.makedirs('logs', exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("logs/orchestrator.log"), # Al archivo
+        logging.StreamHandler()                      # A la pantalla
+    ]
+)
 
 class ClusterManager:
   def __init__(self):
@@ -43,7 +53,7 @@ class ClusterManager:
       logging.info(f'Éxito: {command}')
       return process.stdout
     else:
-      log_name = f'{command.split("/")[-1].split(" ")[0]}.log'
+      log_name = f'logs/{command.split("/")[-1].split(" ")[0]}.log'
       log_file = open(log_name, 'w')
       logging.info(f'Lanzando servicio en segundo plano: {command} (Log: {log_name})')
       return subprocess.Popen(command, shell=True, cwd=cwd, stdout=log_file, stderr=log_file, start_new_session=start_new_session)
@@ -63,6 +73,17 @@ class ClusterManager:
       except (ConnectionRefusedError, socket.timeout):
         time.sleep(1)
     raise TimeoutError(f'Puerto {port} no disponible después de {timeout} segundos.')
+
+  def _wait_for_http(self, url, timeout=20):
+    logging.info(f"⏳ Esperando a que la API responda en {url}...")
+    for _ in range(timeout):
+        try:
+            response = requests.get(url)
+            if response.status_code == 200:
+                return True
+        except requests.ConnectionError:
+            time.sleep(1)
+    return False
     
   class DockerMode:
     def __init__(self, manager):
@@ -99,9 +120,15 @@ class ClusterManager:
 
     def show_service_logs(self, service_name: str):
       '''
-      Abre los logs del servicio en un paginador (less) para scroll y búsqueda.
+      Guarda los logs del servicio en logs/ y luego los abre con less.
       '''        
-      cmd = f"docker compose logs {service_name} | less -S +G"
+      log_file = f"logs/docker_{service_name}.log"
+      logging.info(f"💾 Actualizando archivo de log: {log_file}")
+      dump_cmd = f"docker compose logs --no-color {service_name} > {log_file}"
+      subprocess.run(dump_cmd, shell=True, cwd=self.m.project_home)
+      
+      # Abrimos el archivo que acabamos de crear/actualizar
+      cmd = f"less -S +G {log_file}"
       subprocess.run(cmd, shell=True)
 
     class Mongo:
@@ -124,6 +151,7 @@ class ClusterManager:
       def __init__(self, manager):
         self.m = manager
         self.container_name = 'spark'
+        self.prediction_log = "logs/flight_prediction_2.13-0.1.jar.log"
 
       def train_model(self):
         logging.info("🧠 Iniciando entrenamiento Spark MLlib...")
@@ -135,11 +163,18 @@ class ClusterManager:
         logging.info("🧠 Lanzando predicción en Spark...")
         cmd = (
           "docker exec spark spark-submit " 
-          "--packages org.mongodb.spark:mongo-spark-connector_2.12:10.4.1,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3 "
+          "--packages org.mongodb.spark:mongo-spark-connector_2.13:10.4.1,org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.1 "
           "--master spark://spark:7077 "
-          "/home/ibdn/ibdn/target/scala-2.12/flight_prediction_2.12-0.1.jar"
+          "/app/flight_prediction/target/scala-2.13/flight_prediction_2.13-0.1.jar"
         )
         return self.m._run_command(cmd, wait=False)
+
+      def show_prediction_logs(self):
+        '''Abre el log del JAR de Scala con less'''
+        if os.path.exists(self.prediction_log):
+          subprocess.run(f"less -S +G {self.prediction_log}", shell=True)
+        else:
+          rich.print("[bold red]Archivo de log no encontrado.[/bold red]")
         
     class Kafka:
       def __init__(self, manager):
@@ -175,13 +210,17 @@ def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
   # manager.docker.spark.train_model()
   manager.docker.spark.predict_delay()
 
+  manager._wait_for_http("http://localhost:5001/flights/delays/predict_kafka", timeout=30)
+
   rich.print("\nAccede a la API de predicciones en: [bold blue]http://localhost:5001/flights/delays/predict_kafka[/bold blue]")
 
   rich.print("\n[bold green]🚀  SERVICIOS:[/bold green]")
   rich.print("─" * 40)
   rich.print("[bold cyan]k[/bold cyan] -> Ver logs de [bold]Kafka[/bold] (Full scroll)")
   rich.print("[bold magenta]s[/bold magenta] -> Ver logs de [bold]Spark[/bold] (Full scroll)")
-  rich.print("[bold yellow]m[/bold yellow] -> Ver logs de [bold]MongoDB[/bold] (Full scroll)")
+  rich.print("[bold yellow]w[/bold yellow] -> Ver logs de [bold]Spark Worker[/bold] (Full scroll)")
+  rich.print("[bold green]p[/bold green] -> Ver logs de [bold]Predicción Spark MLlib[/bold] (Full scroll)")
+  rich.print("[bold blue]m[/bold blue] -> Ver logs de [bold]MongoDB[/bold] (Full scroll)")
   rich.print("[bold blue]f[/bold blue] -> Ver logs de [bold]Flask[/bold] (Full scroll)")
   rich.print("[bold red]ctrl+c[/bold red] -> Detener todo y [bold]Salir[/bold]")
   rich.print("─" * 40)
@@ -194,6 +233,10 @@ def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
         manager.docker.show_service_logs("kafka")
       elif choice == 's':
         manager.docker.show_service_logs("spark")
+      elif choice == 'w':
+        manager.docker.show_service_logs("spark-worker")
+      elif choice == 'p':
+        manager.docker.spark.show_prediction_logs()
       elif choice == 'm':
         manager.docker.show_service_logs("mongodb")
       elif choice == 'f':
@@ -201,7 +244,7 @@ def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
       elif choice == '':
         continue
       else:
-        rich.print("[yellow]Opciones válidas: k, s, m, f [/yellow]")
+        rich.print("[yellow]Opciones válidas: k, s, w, p, m, f [/yellow]")
 
   except KeyboardInterrupt:
     rich.print("\n[bold red]🛑 Apagando el cluster...[/bold red]")

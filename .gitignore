@@ -180,3 +180,7 @@ project/project/
 .sbt_metadata/
 .bsp/
 *.sbt
+
+# logs
+logs/*
+!logs/.gitkeep

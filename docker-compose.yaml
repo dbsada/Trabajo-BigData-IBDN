@@ -1,6 +1,6 @@
 services:
   kafka:
-    image: apache/kafka:latest
+    image: apache/kafka:4.2.0
     container_name: kafka
     ports:
       - "9092:9092"
@@ -58,7 +58,7 @@ services:
     working_dir: /app
     environment:
       - SPARK_MASTER=spark://spark:7077
-    command: bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark:7077
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark:7077
 
   flask:
     build:

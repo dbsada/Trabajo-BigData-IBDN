@@ -5,6 +5,8 @@ import org.apache.spark.ml.feature.{Bucketizer, StringIndexerModel, VectorAssemb
 import org.apache.spark.sql.functions.{concat, from_json, lit}
 import org.apache.spark.sql.types.{DataTypes, StructType}
 import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.functions.col
+import scala.jdk.CollectionConverters._ 
 
 object MakePrediction {
 
@@ -19,17 +21,17 @@ object MakePrediction {
     import spark.implicits._
 
     //Load the arrival delay bucketizer
-    val base_path= "/Users/admin/Downloads/practica_creativa"
+    val base_path = "/app" 
     val arrivalBucketizerPath = "%s/models/arrival_bucketizer_2.0.bin".format(base_path)
     print(arrivalBucketizerPath.toString())
     val arrivalBucketizer = Bucketizer.load(arrivalBucketizerPath)
     val columns= Seq("Carrier","Origin","Dest","Route")
 
     //Load all the string field vectorizer pipelines into a dict
-    val stringIndexerModelPath =  columns.map(n=> ("%s/models/string_indexer_model_"
-      .format(base_path)+"%s.bin".format(n)).toSeq)
-    val stringIndexerModel = stringIndexerModelPath.map{n => StringIndexerModel.load(n.toString)}
-    val stringIndexerModels  = (columns zip stringIndexerModel).toMap
+    val stringIndexerModel = columns.map { n => 
+      val path = s"$base_path/models/string_indexer_model_$n.bin"
+      StringIndexerModel.load(path)
+    }
 
     // Load the numeric vector assembler
     val vectorAssemblerPath = "%s/models/numeric_vector_assembler.bin".format(base_path)
@@ -44,7 +46,7 @@ object MakePrediction {
     val df = spark
       .readStream
       .format("kafka")
-      .option("kafka.bootstrap.servers", "localhost:9092")
+      .option("kafka.bootstrap.servers", "kafka:9092")
       .option("subscribe", "flight-delay-ml-request")
       .load()
     df.printSchema()
@@ -70,7 +72,8 @@ object MakePrediction {
       .add("Dest_index", DataTypes.DoubleType)
       .add("Route_index", DataTypes.DoubleType)
 
-    val flightNestedDf = flightJsonDf.select(from_json($"value", struct).as("flight"))
+    val flightNestedDf = flightJsonDf.select(from_json(col("value"), struct).as("flight"))
+
     flightNestedDf.printSchema()
 
     // DataFrame for Vectorizing string fields with the corresponding pipeline for that column
@@ -137,13 +140,20 @@ object MakePrediction {
     finalPredictions.printSchema()
 
     // define a streaming query
+    val mongoOptions = Map(
+      "spark.mongodb.connection.uri" -> "mongodb://mongodb:27017",
+      "spark.mongodb.database"       -> "agile_data_science",
+      "spark.mongodb.collection"     -> "flight_delay_ml_response",
+      "checkpointLocation"           -> "/tmp/spark_checkpoint_mongo"
+    )
+
     val dataStreamWriter = finalPredictions
       .writeStream
       .format("mongodb")
-      .option("spark.mongodb.connection.uri", "mongodb://127.0.0.1:27017")
+      .option("spark.mongodb.connection.uri", "mongodb://mongodb:27017")
       .option("spark.mongodb.database", "agile_data_science")
-      .option("checkpointLocation", "/tmp")
       .option("spark.mongodb.collection", "flight_delay_ml_response")
+      .option("checkpointLocation", "/tmp/spark_checkpoint_mongo")
       .outputMode("append")
 
     // run the query

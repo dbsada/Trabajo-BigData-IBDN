@@ -45,5 +45,5 @@ sudo apt install -y python3-venv
 docker run -it --rm \
   -v $(pwd):/app \
   -w /app/flight_prediction \
-  sbtscala/scala-sbt:eclipse-temurin-11.0.17_8_1.8.2_2.12.17 \
-  sbt package
+  eclipse-temurin:17-jdk \
+  sh -c "curl -sL https://github.com/sbt/sbt/releases/download/v1.9.7/sbt-1.9.7.tgz | tar -xz -C /usr/local && /usr/local/sbt/bin/sbt clean package"
