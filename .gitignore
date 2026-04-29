@@ -171,3 +171,12 @@ Thumbs.db
 
 # Ignore notebook checkpoints
 **/.ipynb_checkpoints/
+
+# --- Scala/SBT Specific ---
+target/
+**/target/
+project/target/
+project/project/
+.sbt_metadata/
+.bsp/
+*.sbt

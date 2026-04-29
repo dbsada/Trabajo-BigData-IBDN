@@ -6,8 +6,6 @@ Este repositorio contiene la resolución de la [práctica creativa](https://gith
 
 La práctica se realizó en una máquina virtual basada en la imagen oficial de Ubuntu Server 22.04.5 ARM64 ([descargar aquí](https://cdimage.ubuntu.com/releases/jammy/release/ubuntu-22.04.5-live-server-arm64.iso)), desplegada con UTM. El acceso y desarrollo se llevaron a cabo a través de SSH, utilizando la extensión de VS Code.
 
-sudo apt update && sudo apt install multitail -y
-
 #### Instalar Docker y Docker Compose
 ```sh
 sudo apt update
@@ -42,3 +40,10 @@ sudo apt install -y docker.io docker-compose-plugin
 sudo apt install -y python3 python3-pip
 sudo apt install -y python3-venv
 ```
+
+
+docker run -it --rm \
+  -v $(pwd):/app \
+  -w /app/flight_prediction \
+  sbtscala/scala-sbt:eclipse-temurin-11.0.17_8_1.8.2_2.12.17 \
+  sbt package
