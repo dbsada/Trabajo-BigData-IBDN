@@ -2,6 +2,8 @@ import sys, os, re
 from flask import Flask, render_template, request
 from pymongo import MongoClient
 from bson import json_util
+import socket
+import time
 
 # Configuration details
 import config
@@ -9,13 +11,9 @@ import config
 # Helpers for search and prediction APIs
 import predict_utils
 
-# Set up Flask, Mongo and Elasticsearch
-app = Flask(__name__)
-
+static_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
+app = Flask(__name__, static_folder=static_folder)
 client = MongoClient('mongodb://mongodb:27017/')
-
-# from pyelasticsearch import ElasticSearch
-# elastic = ElasticSearch(config.ELASTIC_URL)
 
 import json
 
@@ -25,7 +23,15 @@ import datetime
 
 # Setup Kafka
 from kafka import KafkaProducer
-producer = KafkaProducer(bootstrap_servers=['kafka:9093'],api_version=(0,10)) # 9092 -> 9093
+
+for _ in range(20):
+  try:
+    with socket.create_connection(('localhost', 9092), timeout=1):
+      break
+  except (ConnectionRefusedError, socket.timeout):
+    time.sleep(1)
+
+producer = KafkaProducer(bootstrap_servers=['kafka:9092']) 
 PREDICTION_TOPIC = 'flight-delay-ml-request'
 
 import uuid
@@ -61,7 +67,11 @@ def list_flights(origin, dest, flight_date):
       ('ArrTime', 1),
     ]
   )
-  flight_count = flights.count()
+  flight_count = client.agile_data_science.on_time_performance.count_documents({
+    'Origin': origin,
+    'Dest': dest,
+    'FlightDate': flight_date
+  })
   
   return render_template(
     'flights.html',
@@ -129,40 +139,19 @@ def search_airplanes():
   print("nav_path: [{}]".format(nav_path))
   print(json.dumps(nav_offsets))
 
-  # Build the base of our elasticsearch query
-  query = {
-    'query': {
-      'bool': {
-        'must': []}
-    },
-    'sort': [
-      {'Owner': {'order': 'asc'} },
-      # {'Manufacturer': {'order': 'asc', 'ignore_unmapped' : True} },
-      # {'Model': {'order': 'asc', 'ignore_unmapped': True} },
-      # {'EngineManufacturer': {'order': 'asc', 'ignore_unmapped' : True} },
-      # {'EngineModel': {'order': 'asc', 'ignore_unmapped': True} },
-      # {'TailNum': {'order': 'asc', 'ignore_unmapped' : True} },
-      '_score'
-    ],
-    'from': start,
-    'size': config.AIRPLANE_RECORDS_PER_PAGE
-  }
-
   arg_dict = {}
+  mongo_query = {}
   for item in search_config:
     field = item['field']
     value = request.args.get(field)
     print(field, value)
     arg_dict[field] = value
     if value:
-      query['query']['bool']['must'].append({'match': {field: value}})
+      mongo_query[field] = value
 
-  # Query elasticsearch, process to get records and count
-  # results = elastic.search(query)
-  # airplanes, airplane_count = predict_utils.process_search(results)
-  # Añado esto para que no se rompa
-  airplanes = []
-  airplane_count = 0
+  airplanes_cursor = client.agile_data_science.airplanes.find(mongo_query).sort('Owner', 1).skip(start).limit(end - start)
+  airplanes = list(airplanes_cursor)
+  airplane_count = client.agile_data_science.airplanes.count_documents(mongo_query)
 
   # Persist search parameters in the form template
   return render_template(
@@ -240,40 +229,28 @@ def search_flights():
   nav_path = predict_utils.strip_place(request.url)
   nav_offsets = predict_utils.get_navigation_offsets(start, end, config.RECORDS_PER_PAGE)
 
-  # Build the base of our elasticsearch query
-  query = {
-    'query': {
-      'bool': {
-        'must': []}
-    },
-    'sort': [
-      {'FlightDate': {'order': 'asc', 'ignore_unmapped' : True} },
-      {'DepTime': {'order': 'asc', 'ignore_unmapped' : True} },
-      {'Carrier': {'order': 'asc', 'ignore_unmapped' : True} },
-      {'FlightNum': {'order': 'asc', 'ignore_unmapped' : True} },
-      '_score'
-    ],
-    'from': start,
-    'size': config.RECORDS_PER_PAGE
-  }
-
-  # Add any search parameters present
+  mongo_query = {}
   if carrier:
-    query['query']['bool']['must'].append({'match': {'Carrier': carrier}})
+    mongo_query['Carrier'] = carrier
   if flight_date:
-    query['query']['bool']['must'].append({'match': {'FlightDate': flight_date}})
+    mongo_query['FlightDate'] = flight_date
   if origin:
-    query['query']['bool']['must'].append({'match': {'Origin': origin}})
+    mongo_query['Origin'] = origin
   if dest:
-    query['query']['bool']['must'].append({'match': {'Dest': dest}})
+    mongo_query['Dest'] = dest
   if tail_number:
-    query['query']['bool']['must'].append({'match': {'TailNum': tail_number}})
+    mongo_query['TailNum'] = tail_number
   if flight_number:
-    query['query']['bool']['must'].append({'match': {'FlightNum': flight_number}})
+    mongo_query['FlightNum'] = flight_number
 
-  # Query elasticsearch, process to get records and count
-  results = elastic.search(query)
-  flights, flight_count = predict_utils.process_search(results)
+  flights_cursor = client.agile_data_science.on_time_performance.find(mongo_query).sort([
+    ('FlightDate', 1),
+    ('DepTime', 1),
+    ('Carrier', 1),
+    ('FlightNum', 1)
+  ]).skip(start).limit(end - start)
+  flights = list(flights_cursor)
+  flight_count = client.agile_data_science.on_time_performance.count_documents(mongo_query)
 
   # Persist search parameters in the form template
   return render_template(
@@ -544,5 +521,5 @@ if __name__ == "__main__":
     app.run(
     debug=True,
     host='0.0.0.0',
-    port='5000' # 5001 -> 5000
+    port='5001'
   )

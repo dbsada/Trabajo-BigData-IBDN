@@ -93,13 +93,16 @@ class ClusterManager:
 
       self.m._wait_for_port(8080)
       logging.info('Spark Master está listo.')
+      
+      self.m._wait_for_port(5001)
+      logging.info('Servicio de API Flask está listo.')
 
     def show_service_logs(self, service_name: str):
-        '''
-        Abre los logs del servicio en un paginador (less) para scroll y búsqueda.
-        '''        
-        cmd = f"docker compose logs {service_name} | less -S +G"
-        subprocess.run(cmd, shell=True)
+      '''
+      Abre los logs del servicio en un paginador (less) para scroll y búsqueda.
+      '''        
+      cmd = f"docker compose logs {service_name} | less -S +G"
+      subprocess.run(cmd, shell=True)
 
     class Mongo:
       def __init__(self, manager):
@@ -128,6 +131,16 @@ class ClusterManager:
         
         return self.m._run_command(cmd)
 
+      def predict_delay(self):
+        logging.info("🧠 Lanzando predicción en Spark...")
+        cmd = (
+          "docker exec spark spark-submit " 
+          "--packages org.mongodb.spark:mongo-spark-connector_2.12:10.4.1,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3 "
+          "--master spark://spark:7077 "
+          "/home/ibdn/ibdn/target/scala-2.12/flight_prediction_2.12-0.1.jar"
+        )
+        return self.m._run_command(cmd, wait=False)
+        
     class Kafka:
       def __init__(self, manager):
         self.m = manager
@@ -137,7 +150,7 @@ class ClusterManager:
         logging.info(f"📝 Creando tópico '{topic_name}' en Docker...")
         cmd = (
             f"docker exec {self.name} /opt/kafka/bin/kafka-topics.sh "
-            f"--create --bootstrap-server localhost:9093 "
+            f"--create --bootstrap-server localhost:9092 "
             f"--topic {topic_name} --partitions 1 --replication-factor 1 --if-not-exists"
         )
         return self.m._run_command(cmd)
@@ -160,12 +173,16 @@ def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
   
   manager.docker.kafka.create_topic("flight-delay-ml-request")
   # manager.docker.spark.train_model()
+  manager.docker.spark.predict_delay()
+
+  rich.print("\nAccede a la API de predicciones en: [bold blue]http://localhost:5001/flights/delays/predict_kafka[/bold blue]")
 
   rich.print("\n[bold green]🚀  SERVICIOS:[/bold green]")
   rich.print("─" * 40)
   rich.print("[bold cyan]k[/bold cyan] -> Ver logs de [bold]Kafka[/bold] (Full scroll)")
   rich.print("[bold magenta]s[/bold magenta] -> Ver logs de [bold]Spark[/bold] (Full scroll)")
   rich.print("[bold yellow]m[/bold yellow] -> Ver logs de [bold]MongoDB[/bold] (Full scroll)")
+  rich.print("[bold blue]f[/bold blue] -> Ver logs de [bold]Flask[/bold] (Full scroll)")
   rich.print("[bold red]ctrl+c[/bold red] -> Detener todo y [bold]Salir[/bold]")
   rich.print("─" * 40)
 
@@ -179,10 +196,12 @@ def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
         manager.docker.show_service_logs("spark")
       elif choice == 'm':
         manager.docker.show_service_logs("mongodb")
+      elif choice == 'f':
+        manager.docker.show_service_logs("flask")
       elif choice == '':
         continue
       else:
-        rich.print("[yellow]Opciones válidas: k, s, m [/yellow]")
+        rich.print("[yellow]Opciones válidas: k, s, m, f [/yellow]")
 
   except KeyboardInterrupt:
     rich.print("\n[bold red]🛑 Apagando el cluster...[/bold red]")

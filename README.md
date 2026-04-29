@@ -6,6 +6,8 @@ Este repositorio contiene la resolución de la [práctica creativa](https://gith
 
 La práctica se realizó en una máquina virtual basada en la imagen oficial de Ubuntu Server 22.04.5 ARM64 ([descargar aquí](https://cdimage.ubuntu.com/releases/jammy/release/ubuntu-22.04.5-live-server-arm64.iso)), desplegada con UTM. El acceso y desarrollo se llevaron a cabo a través de SSH, utilizando la extensión de VS Code.
 
+sudo apt update && sudo apt install multitail -y
+
 #### Instalar Docker y Docker Compose
 ```sh
 sudo apt update

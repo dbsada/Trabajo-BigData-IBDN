@@ -3,16 +3,9 @@ import pymongo
 import datetime, iso8601
 
 def process_search(results):
-  """Process elasticsearch hits and return flights records"""
-  records = []
-  total = 0
-  if results['hits'] and results['hits']['hits']:
-    total = results['hits']['total']
-    hits = results['hits']['hits']
-    for hit in hits:
-      record = hit['_source']
-      records.append(record)
-  return records, total
+  """(Eliminado: procesamiento de resultados de elasticsearch)"""
+  # Esta función ya no es necesaria si no se usa elasticsearch
+  return [], 0
 
 def get_navigation_offsets(offset1, offset2, increment):
   """Calculate offsets for fetching lists of flights from MongoDB"""

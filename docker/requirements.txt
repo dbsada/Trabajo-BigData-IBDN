@@ -2,3 +2,5 @@ flask==2.2.5
 pymongo
 kafka-python
 requests
+iso8601
+joblib

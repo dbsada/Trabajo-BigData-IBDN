@@ -7,12 +7,11 @@ services:
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: 'broker,controller'
-      KAFKA_LISTENERS: 'INTERNAL://:9093,EXTERNAL://:9092,CONTROLLER://:9094'
-      KAFKA_ADVERTISED_LISTENERS: 'INTERNAL://kafka:9093,EXTERNAL://localhost:9092'
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT'
+      KAFKA_LISTENERS: 'PLAINTEXT://:9092,CONTROLLER://:9093'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:9092' # <--- Flask usará esto
       KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
-      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:9094'
-      KAFKA_INTER_BROKER_LISTENER_NAME: 'INTERNAL'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:9093'
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
     volumes:
       - ./data/kafka:/var/lib/kafka/data
@@ -41,22 +40,37 @@ services:
       dockerfile: docker/dockerfile.spark
     container_name: spark
     ports:
-      - "8080:8080"
-      - "7077:7077"
+      - "8080:8080" # Web UI del Master
+      - "7077:7077" # Puerto de comunicación
     volumes:
       - .:/app
     working_dir: /app
 
-  python:
+  spark-worker:
+    build:
+      context: .
+      dockerfile: docker/dockerfile.spark
+    container_name: spark-worker
+    depends_on:
+      - spark
+    volumes:
+      - .:/app
+    working_dir: /app
+    environment:
+      - SPARK_MASTER=spark://spark:7077
+    command: bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark:7077
+
+  flask:
     build:
       context: .
       dockerfile: docker/dockerfile.python
     container_name: flask
     ports:
-      - "5000:5000"
+      - "5001:5001"
     depends_on:
       - kafka
     volumes:
       - .:/app
     environment:
-      - FLASK_ENV=development
+      - FLASK_DEBUG=1
+      - PROJECT_HOME=/app/  
