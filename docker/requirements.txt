@@ -4,3 +4,4 @@ kafka-python
 requests
 iso8601
 joblib
+boto3

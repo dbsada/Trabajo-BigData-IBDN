@@ -15,6 +15,13 @@ RUN curl -L https://downloads.apache.org/spark/spark-$SPARK_VERSION/spark-$SPARK
     | tar -xz -C /opt && \
     mv /opt/spark-$SPARK_VERSION-bin-hadoop3 /opt/spark
 
+# 3. Iceberg Spark runtime for Spark 4.x (compatible with 4.1.x)
+RUN curl -L -o /opt/spark/jars/iceberg-spark-runtime-4.0_2.13-1.10.1.jar \
+  https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-4.0_2.13/1.10.1/iceberg-spark-runtime-4.0_2.13-1.10.1.jar
+
+# 5. Spark default config (Iceberg + S3A/MinIO)
+COPY docker/spark-defaults.conf /opt/spark/conf/spark-defaults.conf
+
 RUN pip3 install numpy pyspark findspark --break-system-packages
 
 ENV PATH="/opt/spark/bin:$PATH"

@@ -40,10 +40,12 @@ services:
       dockerfile: docker/dockerfile.spark
     container_name: spark
     ports:
-      - "8080:8080" # Web UI del Master
-      - "7077:7077" # Puerto de comunicación
+      - "${SPARK_MASTER_UI_PORT}:${SPARK_MASTER_UI_PORT}" # Web UI del Master
+      - "${SPARK_MASTER_PORT}:${SPARK_MASTER_PORT}" # Puerto de comunicación
     volumes:
       - .:/app
+      - ./data/coursier:/root/.cache/coursier
+      - ./data/ivy2:/root/.ivy2
     working_dir: /app
 
   spark-worker:
@@ -55,10 +57,12 @@ services:
       - spark
     volumes:
       - .:/app
+      - ./data/coursier:/root/.cache/coursier
+      - ./data/ivy2:/root/.ivy2
     working_dir: /app
     environment:
-      - SPARK_MASTER=spark://spark:7077
-    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark:7077
+      - SPARK_MASTER=${SPARK_MASTER_URL}
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker ${SPARK_MASTER_URL}
 
   flask:
     build:
@@ -66,11 +70,29 @@ services:
       dockerfile: docker/dockerfile.python
     container_name: flask
     ports:
-      - "5001:5001"
+      - "${FLASK_PORT}:${FLASK_PORT}"
     depends_on:
       - kafka
     volumes:
       - .:/app
     environment:
       - FLASK_DEBUG=1
-      - PROJECT_HOME=/app/  
+      - PROJECT_HOME=/app/
+      - MONGODB_URI=${MONGODB_URI}
+      - MONGODB_DATABASE=${MONGODB_DATABASE}
+      - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS}
+      - KAFKA_LOCAL_BOOTSTRAP_SERVERS=${KAFKA_LOCAL_BOOTSTRAP_SERVERS}
+      - KAFKA_TOPIC=${KAFKA_TOPIC}
+
+  minio:
+    image: minio/minio
+    container_name: minio
+    ports:
+      - "${MINIO_API_PORT}:${MINIO_API_PORT}"
+      - "${MINIO_CONSOLE_PORT}:${MINIO_CONSOLE_PORT}"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - ./data/minio:/data
+    command: server /data --console-address ":9001"

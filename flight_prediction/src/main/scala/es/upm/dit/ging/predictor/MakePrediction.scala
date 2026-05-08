@@ -15,13 +15,12 @@ object MakePrediction {
 
     val spark = SparkSession
       .builder
-      .appName("StructuredNetworkWordCount")
-      .master("local[*]")
+      .appName("FlightDelayPrediction")
       .getOrCreate()
     import spark.implicits._
 
     //Load the arrival delay bucketizer
-    val base_path = "/app" 
+    val base_path = "s3a://lakehouse" 
     val arrivalBucketizerPath = "%s/models/arrival_bucketizer_2.0.bin".format(base_path)
     print(arrivalBucketizerPath.toString())
     val arrivalBucketizer = Bucketizer.load(arrivalBucketizerPath)

@@ -13,7 +13,15 @@ import predict_utils
 
 static_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
 app = Flask(__name__, static_folder=static_folder)
-client = MongoClient('mongodb://mongodb:27017/')
+
+MONGODB_URI = os.getenv('MONGODB_URI', 'mongodb://mongodb:27017/')
+MONGODB_DATABASE = os.getenv('MONGODB_DATABASE', 'agile_data_science')
+KAFKA_BOOTSTRAP_SERVERS = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka:9092')
+KAFKA_LOCAL_BOOTSTRAP_SERVERS = os.getenv('KAFKA_LOCAL_BOOTSTRAP_SERVERS', 'localhost:9092')
+KAFKA_TOPIC = os.getenv('KAFKA_TOPIC', 'flight-delay-ml-request')
+
+client = MongoClient(MONGODB_URI)
+db = client[MONGODB_DATABASE]
 
 import json
 
@@ -26,13 +34,14 @@ from kafka import KafkaProducer
 
 for _ in range(20):
   try:
-    with socket.create_connection(('localhost', 9092), timeout=1):
+    local_host, local_port = KAFKA_LOCAL_BOOTSTRAP_SERVERS.split(':')
+    with socket.create_connection((local_host, int(local_port)), timeout=1):
       break
   except (ConnectionRefusedError, socket.timeout):
     time.sleep(1)
 
-producer = KafkaProducer(bootstrap_servers=['kafka:9092']) 
-PREDICTION_TOPIC = 'flight-delay-ml-request'
+producer = KafkaProducer(bootstrap_servers=[KAFKA_BOOTSTRAP_SERVERS]) 
+PREDICTION_TOPIC = KAFKA_TOPIC
 
 import uuid
 
@@ -44,7 +53,7 @@ def on_time_performance():
   flight_date = request.args.get('FlightDate')
   flight_num = request.args.get('FlightNum')
   
-  flight = client.agile_data_science.on_time_performance.find_one({
+  flight = db.on_time_performance.find_one({
     'Carrier': carrier,
     'FlightDate': flight_date,
     'FlightNum': flight_num
@@ -56,7 +65,7 @@ def on_time_performance():
 @app.route("/flights/<origin>/<dest>/<flight_date>")
 def list_flights(origin, dest, flight_date):
   
-  flights = client.agile_data_science.on_time_performance.find(
+  flights = db.on_time_performance.find(
     {
       'Origin': origin,
       'Dest': dest,
@@ -67,7 +76,7 @@ def list_flights(origin, dest, flight_date):
       ('ArrTime', 1),
     ]
   )
-  flight_count = client.agile_data_science.on_time_performance.count_documents({
+  flight_count = db.on_time_performance.count_documents({
     'Origin': origin,
     'Dest': dest,
     'FlightDate': flight_date
@@ -83,7 +92,7 @@ def list_flights(origin, dest, flight_date):
 # Controller: Fetch a flight table
 @app.route("/total_flights")
 def total_flights():
-  total_flights = client.agile_data_science.flights_by_month.find({}, 
+  total_flights = db.flights_by_month.find({}, 
     sort = [
       ('Year', 1),
       ('Month', 1)
@@ -93,7 +102,7 @@ def total_flights():
 # Serve the chart's data via an asynchronous request (formerly known as 'AJAX')
 @app.route("/total_flights.json")
 def total_flights_json():
-  total_flights = client.agile_data_science.flights_by_month.find({}, 
+  total_flights = db.flights_by_month.find({}, 
     sort = [
       ('Year', 1),
       ('Month', 1)
@@ -103,7 +112,7 @@ def total_flights_json():
 # Controller: Fetch a flight chart
 @app.route("/total_flights_chart")
 def total_flights_chart():
-  total_flights = client.agile_data_science.flights_by_month.find({}, 
+  total_flights = db.flights_by_month.find({}, 
     sort = [
       ('Year', 1),
       ('Month', 1)
@@ -149,9 +158,9 @@ def search_airplanes():
     if value:
       mongo_query[field] = value
 
-  airplanes_cursor = client.agile_data_science.airplanes.find(mongo_query).sort('Owner', 1).skip(start).limit(end - start)
+  airplanes_cursor = db.airplanes.find(mongo_query).sort('Owner', 1).skip(start).limit(end - start)
   airplanes = list(airplanes_cursor)
-  airplane_count = client.agile_data_science.airplanes.count_documents(mongo_query)
+  airplane_count = db.airplanes.count_documents(mongo_query)
 
   # Persist search parameters in the form template
   return render_template(
@@ -167,14 +176,14 @@ def search_airplanes():
 @app.route("/airplanes/chart/manufacturers.json")
 @app.route("/airplanes/chart/manufacturers.json")
 def airplane_manufacturers_chart():
-  mfr_chart = client.agile_data_science.airplane_manufacturer_totals.find_one()
+  mfr_chart = db.airplane_manufacturer_totals.find_one()
   return json.dumps(mfr_chart)
 
 # Controller: Fetch a flight and display it
 @app.route("/airplane/<tail_number>")
 @app.route("/airplane/flights/<tail_number>")
 def flights_per_airplane(tail_number):
-  flights = client.agile_data_science.flights_per_airplane.find_one(
+  flights = db.flights_per_airplane.find_one(
     {'TailNum': tail_number}
   )
   return render_template(
@@ -186,10 +195,10 @@ def flights_per_airplane(tail_number):
 # Controller: Fetch an airplane entity page
 @app.route("/airline/<carrier_code>")
 def airline(carrier_code):
-  airline_summary = client.agile_data_science.airlines.find_one(
+  airline_summary = db.airlines.find_one(
     {'CarrierCode': carrier_code}
   )
-  airline_airplanes = client.agile_data_science.airplanes_per_carrier.find_one(
+  airline_airplanes = db.airplanes_per_carrier.find_one(
     {'Carrier': carrier_code}
   )
   return render_template(
@@ -204,7 +213,7 @@ def airline(carrier_code):
 @app.route("/airlines")
 @app.route("/airlines/")
 def airlines():
-  airlines = client.agile_data_science.airplanes_per_carrier.find()
+  airlines = db.airplanes_per_carrier.find()
   return render_template('all_airlines.html', airlines=airlines)
 
 @app.route("/flights/search")
@@ -243,14 +252,14 @@ def search_flights():
   if flight_number:
     mongo_query['FlightNum'] = flight_number
 
-  flights_cursor = client.agile_data_science.on_time_performance.find(mongo_query).sort([
+  flights_cursor = db.on_time_performance.find(mongo_query).sort([
     ('FlightDate', 1),
     ('DepTime', 1),
     ('Carrier', 1),
     ('FlightNum', 1)
   ]).skip(start).limit(end - start)
   flights = list(flights_cursor)
-  flight_count = client.agile_data_science.on_time_performance.count_documents(mongo_query)
+  flight_count = db.on_time_performance.count_documents(mongo_query)
 
   # Persist search parameters in the form template
   return render_template(
@@ -376,7 +385,7 @@ def classify_flight_delays():
   # Add a timestamp
   prediction_features['Timestamp'] = predict_utils.get_current_timestamp()
   
-  client.agile_data_science.prediction_tasks.insert_one(
+  db.prediction_tasks.insert_one(
     prediction_features
   )
   return json_util.dumps(prediction_features)
@@ -408,7 +417,7 @@ def flight_delays_batch_results_page(iso_date):
   iso_tomorrow = rounded_tomorrow_dt.isoformat()
   
   # Fetch today's prediction results from Mongo
-  predictions = client.agile_data_science.prediction_results.find(
+  predictions = db.prediction_results.find(
     {
       'Timestamp': {
         "$gte": iso_today,
@@ -493,7 +502,7 @@ def flight_delays_page_kafka():
 def classify_flight_delays_realtime_response(unique_id):
   """Serves predictions to polling requestors"""
   
-  prediction = client.agile_data_science.flight_delay_ml_response.find_one(
+  prediction = db.flight_delay_ml_response.find_one(
     {
       "UUID": unique_id
     }
@@ -521,5 +530,5 @@ if __name__ == "__main__":
     app.run(
     debug=True,
     host='0.0.0.0',
-    port='5001'
+    port=os.getenv('FLASK_PORT', '5001')
   )

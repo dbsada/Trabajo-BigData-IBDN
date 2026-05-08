@@ -1,28 +1,17 @@
-import sys, os, re
+import sys, os, re, logging
 from os import environ
 
-# Pass date and base path to main() from airflow
-def main(base_path):
-  
-  # Default to "."
-  try: base_path
-  except NameError: base_path = "."
-  if not base_path:
-    base_path = "."
-  
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+
+def main(base_path=None):
+
   APP_NAME = "train_spark_mllib_model.py"
   
-  # If there is no SparkSession, create the environment
-  try:
-    sc and spark
-  except (NameError, UnboundLocalError) as e:
-    import findspark
-    findspark.init()
-    import pyspark
-    import pyspark.sql
-    
-    sc = pyspark.SparkContext()
-    spark = pyspark.sql.SparkSession(sc).builder.appName(APP_NAME).getOrCreate()
+  from pyspark.sql import SparkSession
+
+  spark = SparkSession.builder \
+    .appName(APP_NAME) \
+    .getOrCreate()
   
   #
   # {
@@ -51,11 +40,14 @@ def main(base_path):
     StructField("Origin", StringType(), True),      # "Origin":"TUS"
   ])
   
-  input_path = "{}/data/simple_flight_delay_features.jsonl.bz2".format(
-    base_path
-  )
-  features = spark.read.json(input_path, schema=schema)
+  input_path = "s3a://lakehouse/raw/simple_flight_delay_features.jsonl.bz2"
+  features = spark.read.json(input_path, schema=schema).repartition(4)
   features.first()
+
+  features.writeTo("lakehouse.flight_delays").createOrReplace()
+  logging.info("✅ Tabla Iceberg 'lakehouse.flight_delays' creada/actualizada")
+
+  features = spark.table("lakehouse.flight_delays")
   
   #
   # Check for nulls in features before using Spark ML
@@ -91,9 +83,9 @@ def main(base_path):
     outputCol="ArrDelayBucket"
   )
   
-  # Save the bucketizer
-  arrival_bucketizer_path = "{}/models/arrival_bucketizer_2.0.bin".format(base_path)
+  arrival_bucketizer_path = "s3a://lakehouse/models/arrival_bucketizer_2.0.bin"
   arrival_bucketizer.write().overwrite().save(arrival_bucketizer_path)
+  logging.info(f"✅ Bucketizer guardado en {arrival_bucketizer_path}")
   
   # Apply the bucketizer
   ml_bucketized_features = arrival_bucketizer.transform(features_with_route)
@@ -117,12 +109,9 @@ def main(base_path):
     # Drop the original column
     ml_bucketized_features = ml_bucketized_features.drop(column)
     
-    # Save the pipeline model
-    string_indexer_output_path = "{}/models/string_indexer_model_{}.bin".format(
-      base_path,
-      column
-    )
+    string_indexer_output_path = "s3a://lakehouse/models/string_indexer_model_{}.bin".format(column)
     string_indexer_model.write().overwrite().save(string_indexer_output_path)
+    logging.info(f"✅ StringIndexer para {column} guardado en {string_indexer_output_path}")
   
   # Combine continuous, numeric fields with indexes of nominal ones
   # ...into one feature vector
@@ -138,9 +127,9 @@ def main(base_path):
   )
   final_vectorized_features = vector_assembler.transform(ml_bucketized_features)
   
-  # Save the numeric vector assembler
-  vector_assembler_path = "{}/models/numeric_vector_assembler.bin".format(base_path)
+  vector_assembler_path = "s3a://lakehouse/models/numeric_vector_assembler.bin"
   vector_assembler.write().overwrite().save(vector_assembler_path)
+  logging.info(f"✅ VectorAssembler guardado en {vector_assembler_path}")
   
   # Drop the index columns
   for column in index_columns:
@@ -160,11 +149,9 @@ def main(base_path):
   )
   model = rfc.fit(final_vectorized_features)
   
-  # Save the new model over the old one
-  model_output_path = "{}/models/spark_random_forest_classifier.flight_delays.5.0.bin".format(
-    base_path
-  )
+  model_output_path = "s3a://lakehouse/models/spark_random_forest_classifier.flight_delays.5.0.bin"
   model.write().overwrite().save(model_output_path)
+  logging.info(f"✅ RandomForest model guardado en {model_output_path}")
   
   # Evaluate model using test data
   predictions = model.transform(final_vectorized_features)
@@ -185,4 +172,4 @@ def main(base_path):
   predictions.sample(False, 0.001, 18).orderBy("CRSDepTime").show(6)
 
 if __name__ == "__main__":
-  main(sys.argv[1])
+  main()
