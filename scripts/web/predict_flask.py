@@ -28,6 +28,22 @@ KAFKA_RESPONSE_TOPIC = os.getenv('KAFKA_RESPONSE_TOPIC', 'flight-delay-ml-respon
 client = MongoClient(MONGODB_URI)
 db = client[MONGODB_DATABASE]
 
+@app.context_processor
+def inject_arch_info():
+    host = None
+    try:
+        host = __import__('subprocess').run(
+            ['hostname', '-I'], capture_output=True, text=True
+        ).stdout.strip().split()[0]
+    except:
+        pass
+    return dict(
+        VM_IP=host or 'localhost',
+        DB_MODE=os.getenv('DB_MODE', 'cassandra'),
+        KAFKA_TOPIC=os.getenv('KAFKA_TOPIC', 'flight-delay-ml-request'),
+        KAFKA_RESPONSE_TOPIC=os.getenv('KAFKA_RESPONSE_TOPIC', 'flight-delay-ml-response'),
+    )
+
 # Setup Kafka
 from kafka import KafkaProducer, KafkaConsumer
 
@@ -273,8 +289,18 @@ def airline(carrier_code):
     carrier_code=carrier_code
   )
 
-# Controller: Fetch an airplane entity page
+# Home page — flight delay prediction
 @app.route("/")
+def index():
+  form_config = [
+    {'field': 'DepDelay', 'label': 'Departure Delay', 'value': 5},
+    {'field': 'Carrier', 'value': 'AA'},
+    {'field': 'FlightDate', 'label': 'Date', 'value': '2016-12-25'},
+    {'field': 'Origin', 'value': 'ATL'},
+    {'field': 'Dest', 'label': 'Destination', 'value': 'SFO'}
+  ]
+  return render_template('flight_delays_predict_kafka.html', form_config=form_config)
+
 @app.route("/airlines")
 @app.route("/airlines/")
 def airlines():

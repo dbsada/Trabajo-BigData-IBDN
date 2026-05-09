@@ -2,35 +2,127 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <title>Agile Data Science</title>
+    <title>IBDN · Flight Delay Prediction</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="Chapter 5 example in Agile Data Science, 2.0">
-    <meta name="author" content="Russell Jurney">
-    <link href="/static/bootstrap.min.css" rel="stylesheet">
-    <link href="/static/bootstrap-theme.min.css" rel="stylesheet">
-  </head>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: #16161e;
+        color: #b0b0b8;
+        line-height: 1.5;
+        min-height: 100vh;
+      }
+      .container { max-width: 1100px; margin: 0 auto; padding: 2rem 2rem; }
+      .header {
+        border-bottom: 1px solid #2a2a3a;
+        padding-bottom: 0.8rem;
+        margin-bottom: 2rem;
+        font-size: 0.95rem; color: #888;
+      }
+      .header strong { color: #d0d0d8; }
+      .footer {
+        border-top: 1px solid #2a2a3a;
+        padding-top: 0.8rem; margin-top: 2rem;
+        font-size: 0.8rem; color: #555; text-align: center;
+      }
 
+      /* Two-column layout */
+      .main-grid {
+        display: grid;
+        grid-template-columns: 1fr 340px;
+        gap: 2rem;
+        align-items: start;
+      }
+
+      /* Form */
+      .form-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0.6rem 1.2rem;
+      }
+      .form-grid .full { grid-column: 1 / -1; }
+      label {
+        display: block; font-size: 0.8rem; color: #888; margin-bottom: 0.2rem;
+      }
+      input {
+        width: 100%; background: #1e1e2a; border: 1px solid #2a2a3a;
+        color: #d0d0d8; padding: 0.55rem 0.7rem; border-radius: 5px;
+        font-size: 0.9rem; outline: none;
+        transition: border-color 0.2s;
+      }
+      input:focus { border-color: #3b82f6; }
+      button {
+        background: #2563eb; color: #fff; border: none;
+        padding: 0.55rem 1.5rem; border-radius: 5px;
+        font-size: 0.9rem; font-weight: 500; cursor: pointer;
+        transition: background 0.2s;
+      }
+      button:hover { background: #1d4ed8; }
+      .result-box {
+        margin-top: 0.8rem; padding: 0.8rem 1rem;
+        background: #1e1e2a; border: 1px solid #2a2a3a;
+        border-radius: 5px; font-size: 0.9rem;
+        color: #d0d0d8; text-align: center;
+      }
+      .result-box #result { font-weight: 600; color: #60a5fa; }
+
+      /* Architecture diagram */
+      .arch { display: flex; flex-direction: column; gap: 3px; }
+      .arch-title { font-size: 0.8rem; color: #888; margin-bottom: 0.5rem; }
+      .node {
+        display: flex; align-items: center; gap: 0.5rem;
+        padding: 0.35rem 0.6rem; border-radius: 4px;
+        font-size: 0.72rem; font-weight: 500;
+        background: #1e1e2a; border: 1px solid #2a2a3a;
+        transition: all 0.4s;
+      }
+      .node .dot {
+        width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+      }
+      .node .label { flex: 1; }
+      .node .badge { font-size: 0.6rem; color: #555; }
+      .node.active { border-color: #3b82f6; box-shadow: 0 0 6px #3b82f640; }
+      .node.done { border-color: #22c55e; }
+      .node.done .dot { background: #22c55e; }
+
+      .arrow-row {
+        display: flex; align-items: center; gap: 0.3rem;
+        font-size: 0.65rem; color: #444; padding-left: 0.4rem;
+        height: 1.2rem; transition: color 0.3s;
+      }
+      .arrow-row .arrow { font-size: 0.7rem; transition: all 0.3s; }
+      .arrow-row.active { color: #60a5fa; }
+      .arrow-row.active .arrow {
+        color: #60a5fa; animation: arrowPulse 0.6s infinite alternate;
+      }
+      .arrow-row.done { color: #22c55e; }
+      .arrow-row.done .arrow { color: #22c55e; }
+      .arrow-row.fade { color: #444; transition: color 0.6s; }
+      .arrow-row.fade .arrow { color: #444; transition: color 0.6s; }
+      .arrow-row .topic {
+        background: #1e1e2a; padding: 0.1rem 0.4rem; border-radius: 3px;
+        font-size: 0.6rem; color: #666; border: 1px solid #2a2a3a;
+        white-space: nowrap;
+      }
+      @keyframes arrowPulse {
+        from { opacity: 0.5; transform: translateX(0); }
+        to   { opacity: 1;   transform: translateX(3px); }
+      }
+      .db-inactive { opacity: 0.35; }
+      a { color: #60a5fa; text-decoration: none; }
+      a:hover { text-decoration: underline; }
+    </style>
+  </head>
   <body>
     <script src="/static/jquery-1.12.2.min.js"></script>
-    <script src="/static/bootstrap.min.js"></script>
-    <script src="/static/d3.v3.min.js"></script>
-    <div id="wrap">
-
-      <!-- Begin page content -->
-      <div class="container">
-        <div class="page-header" style="margin: 0px;">
-          <h2>Agile Data Science</h2>
-        </div>
-        {% block body %}{% endblock %}
+    <div class="container">
+      <div class="header"><strong>✈ IBDN</strong> · Flight Delay Prediction</div>
+      <div class="main-grid">
+        <div>{% block body %}{% endblock %}</div>
+        <div>{% block arch %}{% endblock %}</div>
       </div>
-
-      <div id="push"></div>
-    </div>
-
-    <div id="footer">
-      <div class="container">
-        <p class="muted credit"><a href="http://shop.oreilly.com/product/0636920025054.do">Agile Data Science</a> by <a href="http://www.linkedin.com/in/russelljurney">Russell Jurney</a>, 2016
-      </div>
+      <div class="footer">IBDN Cluster · v2.0</div>
     </div>
   </body>
 </html>

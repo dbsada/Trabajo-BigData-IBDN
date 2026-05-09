@@ -1,43 +1,127 @@
 {% extends "layout.html" %}
 {% block body %}
-  <!-- Navigation guide -->
-  / <a href="/flights/delays/predict_kafka">Flight Delay Prediction with Kafka</a>
-
-  <p class="lead" style="margin: 10px; margin-left: 0px;">
-    <!-- Airline Name and website-->
-    Predicting Flight Delays with Kafka
-  </p>
-
-  <!-- Generate form from search_config and request args -->
   <form id="flight_delay_classification" action="/flights/delays/predict/classify_realtime" method="post">
-    {% for item in form_config %}
-      {% if 'label' in item %}
-        <label for="{{item['field']}}">{{item['label']}}</label>
-      {% else %}
-        <label for="{{item['field']}}">{{item['field']}}</label>
-      {% endif %}
-        <input name="{{item['field']}}" style="width: 36px; margin-right: 10px;" 
-        {% if 'value' in item %}
-          value="{{item['value']}}"
-        {% endif %}
-        ></input>
-    {% endfor %}
-    <button type="submit" class="btn btn-xs btn-default" style="height: 25px">Submit</button>
+    <div class="form-grid">
+      {% for item in form_config %}
+        <div>
+          <label for="{{item['field']}}">{{item.get('label', item['field'])}}</label>
+          <input name="{{item['field']}}" {% if 'value' in item %} value="{{item['value']}}"{% endif %}>
+        </div>
+      {% endfor %}
+      <div class="full" style="text-align: right; margin-top: 0.3rem;">
+        <button type="submit" id="predict-btn">Predict</button>
+      </div>
+    </div>
   </form>
+  <div class="result-box">Delay: <span id="result"></span></div>
+{% endblock %}
 
-  <div style="margin-top: 10px;">
-      <p>Delay: <span id="result" style="display: inline-block;"></span></p>
+{% block arch %}
+<div class="arch" id="arch">
+  <div class="arch-title">Architecture</div>
+
+  <div class="node" id="node-browser"><span class="dot" style="background:#888"></span><span class="label">Browser</span><span class="badge">you</span></div>
+  <div class="arrow-row" id="step-0"><span class="arrow">→</span> POST /predict <span class="topic">HTTP</span></div>
+
+  <div class="node" id="node-flask"><span class="dot" style="background:#3b82f6"></span><span class="label">Flask</span><span class="badge">web app</span></div>
+  <div class="arrow-row" id="step-1"><span class="arrow">→</span> <span class="topic">{{ KAFKA_TOPIC }}</span></div>
+
+  <div class="node" id="node-kafka"><span class="dot" style="background:#f59e0b"></span><span class="label">Kafka</span><span class="badge">broker</span></div>
+  <div class="arrow-row" id="step-2"><span class="arrow">→</span> streaming read</div>
+
+  <div class="node" id="node-spark"><span class="dot" style="background:#ef4444"></span><span class="label">Spark</span><span class="badge">ML predict</span></div>
+  <div class="arrow-row" id="step-3"><span class="arrow">→</span> <span class="topic">{{ KAFKA_RESPONSE_TOPIC }}</span></div>
+
+  <div class="node" id="node-kafka-r"><span class="dot" style="background:#f59e0b"></span><span class="label">Kafka</span><span class="badge">response</span></div>
+  <div class="arrow-row" id="step-4"><span class="arrow">→</span> consumer</div>
+
+  <div class="node" id="node-flask2"><span class="dot" style="background:#3b82f6"></span><span class="label">Flask</span><span class="badge">WebSocket</span></div>
+  <div class="arrow-row" id="step-5"><span class="arrow">→</span> <span class="topic">WebSocket</span></div>
+
+  <div style="display:flex; gap:0.5rem; margin-top:0.5rem;">
+    {% if DB_MODE == 'cassandra' %}
+    <div class="node" id="node-cassandra"><span class="dot" style="background:#22c55e"></span><span class="label">Cassandra</span></div>
+    <div class="node db-inactive" id="node-mongo"><span class="dot" style="background:#555"></span><span class="label">MongoDB</span></div>
+    {% else %}
+    <div class="node db-inactive" id="node-cassandra"><span class="dot" style="background:#555"></span><span class="label">Cassandra</span></div>
+    <div class="node" id="node-mongo"><span class="dot" style="background:#22c55e"></span><span class="label">MongoDB</span></div>
+    {% endif %}
+    <div class="node"><span class="dot" style="background:#8b5cf6"></span><span class="label">MinIO</span></div>
   </div>
+</div>
 
-  <!-- Socket.IO client for WebSocket -->
-  <script src="https://cdn.socket.io/4.5.0/socket.io.min.js"></script>
-  <script>
-    const socket = io();
-    socket.on('prediction', function(data) {
-      renderPage(data);
-    });
-  </script>
+<script src="https://cdn.socket.io/4.5.0/socket.io.min.js"></script>
+<script>
+const socket = io();
+const archSteps = [
+  { el: '#step-0', delay: 300 },
+  { el: '#step-1', delay: 800 },
+  { el: '#step-2', delay: 1000 },
+  { el: '#step-3', delay: 12000 },
+  { el: '#step-4', delay: 600  },
+  { el: '#step-5', delay: 400  },
+];
+let stepIndex = 0;
+let stepTimers = [];
+const allNodes = ['node-browser','node-flask','node-kafka','node-spark','node-kafka-r','node-flask2','node-browser'];
 
-  <!-- Load our form processing javascript -->
-  <script src="/static/flight_delay_predict_polling.js"></script>
+function resetArch() {
+  stepTimers.forEach(t => clearTimeout(t));
+  stepTimers = [];
+  stepIndex = 0;
+  document.querySelectorAll('#arch .arrow-row').forEach(e => e.classList.remove('active','fade'));
+  document.querySelectorAll('#arch .node').forEach(e => e.classList.remove('active'));
+}
+
+function advanceArch() {
+  if (stepIndex > 0) {
+    const prev = document.querySelector(archSteps[stepIndex - 1].el);
+    prev.classList.remove('active');
+    prev.classList.add('fade');
+    setTimeout(() => prev.classList.remove('fade'), 600);
+    if (stepIndex - 1 < allNodes.length) {
+      const pn = document.querySelector('#' + allNodes[stepIndex - 1]);
+      if (pn) pn.classList.remove('active');
+    }
+  }
+  if (stepIndex < archSteps.length) {
+    document.querySelector(archSteps[stepIndex].el).classList.add('active');
+    if (stepIndex < allNodes.length) {
+      const n = document.querySelector('#' + allNodes[stepIndex]);
+      if (n) n.classList.add('active');
+    }
+    stepTimers.push(setTimeout(advanceArch, archSteps[stepIndex].delay));
+    stepIndex++;
+  }
+}
+
+$("#flight_delay_classification").submit(function(event) {
+  event.preventDefault();
+  resetArch();
+  $("#predict-btn").prop('disabled', true).text('Sending...');
+  var posting = $.post($(this).attr('action'), $(this).serialize());
+  posting.done(function(data) {
+    var response = JSON.parse(data);
+    if (response.status == "OK") {
+      advanceArch();
+      setTimeout(() => advanceArch(), 600);
+      $("#result").empty().append("Processing...");
+    }
+  });
+});
+
+socket.on('prediction', function(data) {
+  stepTimers.forEach(t => clearTimeout(t));
+  stepTimers = [];
+  stepIndex = 3;
+  advanceArch();
+  setTimeout(() => advanceArch(), 600);
+  setTimeout(() => {
+    advanceArch();
+    $("#predict-btn").prop('disabled', false).text('Predict');
+  }, 800);
+  renderPage(data);
+});
+</script>
+<script src="/static/flight_delay_predict_polling.js"></script>
 {% endblock %}

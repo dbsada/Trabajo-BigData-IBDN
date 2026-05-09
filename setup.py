@@ -32,6 +32,11 @@ logging.basicConfig(
 _status_line = ""
 console = Console()
 
+def _quiet_ask(question):
+    with open(os.devnull, 'w') as null:
+        with __import__('contextlib').redirect_stderr(null):
+            return question.ask()
+
 def set_status(text):
     global _status_line
     if _status_line:
@@ -127,10 +132,12 @@ class ClusterManager:
     table.add_column("URL", style="dim", justify="center", min_width=20)
     for s in services:
       status = s.get("status", "·")
+      name_style = "green" if s["ready"] else "grey50"
       url = ""
       if s["name"] in ("Flask", "MinIO", "Spark"):
         url = f"http://{vm_ip}:{s['port']}"
-      table.add_row(s["name"], status, str(s["port"]) if s.get("port") else "-", url)
+      table.add_row(Text(s["name"], style=name_style), status,
+                    str(s["port"]) if s.get("port") else "-", url)
     return table
     
   class DockerMode:
@@ -369,10 +376,10 @@ def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
     rich.print("[dim]" + "─" * (console.width-2) + "[/dim]")
 
     while True:
-      main_choice = questionary.select(
+      main_choice = _quiet_ask(questionary.select(
         "ibdn@cluster",
         choices=[ "📋 Menú de logs" ]
-      ).ask()
+      ))
 
       if main_choice is None:
         break
@@ -393,11 +400,11 @@ def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
         rich.print(f"\n   [dim]Servicios: Kafka / Spark (Master) / Spark Worker /\n"
                    f"   Predicción MLlib / {db_label} / Flask / MinIO[/dim]")
         while True:
-          log_choice = questionary.autocomplete(
+          log_choice = _quiet_ask(questionary.autocomplete(
             "📋 Filtrar:",
             choices=log_services,
             complete_style=CompleteStyle.READLINE_LIKE
-          ).ask()
+          ))
 
           if log_choice is None or log_choice == "← Volver":
             break
@@ -449,23 +456,23 @@ if __name__ == '__main__':
   console.print(title_panel)
   console.print()
 
-  infra = questionary.select(
+  infra = _quiet_ask(questionary.select(
       "¿Qué infraestructura deseas usar?",
       choices=[
           "Docker",
           "Kubernetes"
       ],
       default="Docker"
-  ).ask()
+  ))
 
-  db_choice = questionary.select(
+  db_choice = _quiet_ask(questionary.select(
       "¿Qué base de datos quieres levantar?",
       choices=[
           "MongoDB",
           "Cassandra"
       ],
       default="Cassandra"
-  ).ask()
+  ))
 
   # Clear 2 lines of questions from terminal
   sys.stdout.write("\033[1A\033[2K\033[1A\033[2K")
