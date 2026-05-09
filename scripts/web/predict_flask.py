@@ -4,33 +4,32 @@ from pymongo import MongoClient
 from bson import json_util
 import socket
 import time
+import json
+import threading
+import iso8601
+import datetime
 
-# Configuration details
+from flask_socketio import SocketIO, emit, join_room
+
 import config
-
-# Helpers for search and prediction APIs
 import predict_utils
 
 static_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
 app = Flask(__name__, static_folder=static_folder)
+socketio = SocketIO(app, cors_allowed_origins="*")
 
 MONGODB_URI = os.getenv('MONGODB_URI', 'mongodb://mongodb:27017/')
 MONGODB_DATABASE = os.getenv('MONGODB_DATABASE', 'agile_data_science')
 KAFKA_BOOTSTRAP_SERVERS = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka:9092')
 KAFKA_LOCAL_BOOTSTRAP_SERVERS = os.getenv('KAFKA_LOCAL_BOOTSTRAP_SERVERS', 'localhost:9092')
 KAFKA_TOPIC = os.getenv('KAFKA_TOPIC', 'flight-delay-ml-request')
+KAFKA_RESPONSE_TOPIC = os.getenv('KAFKA_RESPONSE_TOPIC', 'flight-delay-ml-response')
 
 client = MongoClient(MONGODB_URI)
 db = client[MONGODB_DATABASE]
 
-import json
-
-# Date/time stuff
-import iso8601
-import datetime
-
 # Setup Kafka
-from kafka import KafkaProducer
+from kafka import KafkaProducer, KafkaConsumer
 
 for _ in range(20):
   try:
@@ -40,8 +39,74 @@ for _ in range(20):
   except (ConnectionRefusedError, socket.timeout):
     time.sleep(1)
 
-producer = KafkaProducer(bootstrap_servers=[KAFKA_BOOTSTRAP_SERVERS]) 
+producer = None
 PREDICTION_TOPIC = KAFKA_TOPIC
+
+def get_producer():
+    p = KafkaProducer(bootstrap_servers=[KAFKA_BOOTSTRAP_SERVERS])
+    return p
+
+# Persist prediction based on DB_MODE
+def persist_prediction(data):
+  db_mode = os.getenv('DB_MODE', 'cassandra')
+  if db_mode == 'cassandra':
+    session = predict_utils.get_cassandra_session()
+    if session:
+      session.execute("""
+        CREATE TABLE IF NOT EXISTS agile_data_science.flight_delay_ml_response (
+          uuid text PRIMARY KEY,
+          prediction int,
+          origin text, dest text, dep_delay double,
+          carrier text, flight_date text, flight_num text,
+          distance double, route text,
+          day_of_year int, day_of_month int, day_of_week int,
+          timestamp text
+        )
+      """)
+      session.execute("""
+        INSERT INTO agile_data_science.flight_delay_ml_response 
+        (uuid, prediction, origin, dest, dep_delay, carrier, flight_date, flight_num,
+         distance, route, day_of_year, day_of_month, day_of_week, timestamp)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+      """, (
+        data.get('UUID'), int(data.get('Prediction', 0)),
+        data.get('Origin'), data.get('Dest'), data.get('DepDelay'),
+        data.get('Carrier'), data.get('FlightDate'), data.get('FlightNum'),
+        data.get('Distance'), data.get('Route'),
+        int(data.get('DayOfYear', 0)), int(data.get('DayOfMonth', 0)), int(data.get('DayOfWeek', 0)),
+        str(data.get('Timestamp', ''))
+      ))
+    return
+
+  db.flight_delay_ml_response.insert_one(data)
+
+@socketio.on('subscribe')
+def on_subscribe(data):
+    join_room(data['id'])
+
+# Background Kafka consumer for response topic (lazy, se inicia con primera request)
+@app.before_request
+def ensure_consumer():
+    if not hasattr(ensure_consumer, '_started'):
+        ensure_consumer._started = True
+        t = threading.Thread(target=_kafka_response_listener, daemon=True)
+        t.start()
+
+def _kafka_response_listener():
+  consumer = KafkaConsumer(
+    KAFKA_RESPONSE_TOPIC,
+    bootstrap_servers=[KAFKA_BOOTSTRAP_SERVERS],
+    auto_offset_reset='earliest',
+    group_id='flask-prediction-consumer'
+  )
+  for msg in consumer:
+    try:
+      data = json.loads(msg.value.decode('utf-8'))
+      if isinstance(data, dict) and 'UUID' in data:
+        persist_prediction(data)
+        socketio.emit('prediction', data, room=data.get('UUID', ''))
+    except Exception as e:
+      print(f"Consumer error: {e}")
 
 import uuid
 
@@ -479,7 +544,9 @@ def classify_flight_delays_realtime():
   prediction_features['UUID'] = unique_id
   
   message_bytes = json.dumps(prediction_features).encode()
-  producer.send(PREDICTION_TOPIC, message_bytes)
+  p = get_producer()
+  p.send(PREDICTION_TOPIC, message_bytes)
+  p.flush()
 
   response = {"status": "OK", "id": unique_id}
   return json_util.dumps(response)
@@ -527,8 +594,11 @@ def shutdown():
   return 'Server shutting down...'
 
 if __name__ == "__main__":
-    app.run(
+    socketio.run(
+    app,
     debug=True,
+    use_reloader=False,
     host='0.0.0.0',
-    port=os.getenv('FLASK_PORT', '5001')
+    port=int(os.getenv('FLASK_PORT', '5001')),
+    allow_unsafe_werkzeug=True
   )

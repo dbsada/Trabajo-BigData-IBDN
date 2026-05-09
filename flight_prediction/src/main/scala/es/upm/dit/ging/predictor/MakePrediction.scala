@@ -1,17 +1,14 @@
 package es.upm.dit.ging.predictor
-import com.mongodb.spark._
 import org.apache.spark.ml.classification.RandomForestClassificationModel
 import org.apache.spark.ml.feature.{Bucketizer, StringIndexerModel, VectorAssembler}
-import org.apache.spark.sql.functions.{concat, from_json, lit}
+import org.apache.spark.sql.functions.{col, concat, from_json, lit, to_json, struct}
 import org.apache.spark.sql.types.{DataTypes, StructType}
 import org.apache.spark.sql.{DataFrame, SparkSession}
-import org.apache.spark.sql.functions.col
-import scala.jdk.CollectionConverters._ 
 
 object MakePrediction {
 
   def main(args: Array[String]): Unit = {
-    println("Fligth predictor starting...")
+    println("Flight predictor starting...")
 
     val spark = SparkSession
       .builder
@@ -75,7 +72,6 @@ object MakePrediction {
 
     flightNestedDf.printSchema()
 
-    // DataFrame for Vectorizing string fields with the corresponding pipeline for that column
     val flightFlattenedDf = flightNestedDf.selectExpr("flight.Origin",
       "flight.DayOfWeek","flight.DayOfYear","flight.DayOfMonth","flight.Dest",
       "flight.DepDelay","flight.Timestamp","flight.FlightDate",
@@ -91,7 +87,6 @@ object MakePrediction {
                 )
     )
 
-    // Dataframe for Vectorizing numeric columns
     val flightFlattenedDf2 = flightNestedDf.selectExpr("flight.Origin",
       "flight.DayOfWeek","flight.DayOfYear","flight.DayOfMonth","flight.Dest",
       "flight.DepDelay","flight.Timestamp","flight.FlightDate",
@@ -108,57 +103,39 @@ object MakePrediction {
       )
     )
 
-    // Vectorize string fields with the corresponding pipeline for that column
-    // Turn category fields into categoric feature vectors, then drop intermediate fields
     val predictionRequestsWithRoute = stringIndexerModel.map(n=>n.transform(predictionRequestsWithRouteMod))
 
-    //Vectorize numeric columns: DepDelay, Distance and index columns
     val vectorizedFeatures = vectorAssembler.setHandleInvalid("keep").transform(predictionRequestsWithRouteMod2)
 
-    // Inspect the vectors
     vectorizedFeatures.printSchema()
 
-    // Drop the individual index columns
     val finalVectorizedFeatures = vectorizedFeatures
         .drop("Carrier_index")
         .drop("Origin_index")
         .drop("Dest_index")
         .drop("Route_index")
 
-    // Inspect the finalized features
     finalVectorizedFeatures.printSchema()
 
-    // Make the prediction
     val predictions = rfc.transform(finalVectorizedFeatures)
       .drop("Features_vec")
 
-    // Drop the features vector and prediction metadata to give the original fields
     val finalPredictions = predictions.drop("indices").drop("values").drop("rawPrediction").drop("probability")
 
-    // Inspect the output
     finalPredictions.printSchema()
 
-    // define a streaming query
-    val mongoOptions = Map(
-      "spark.mongodb.connection.uri" -> "mongodb://mongodb:27017",
-      "spark.mongodb.database"       -> "agile_data_science",
-      "spark.mongodb.collection"     -> "flight_delay_ml_response",
-      "checkpointLocation"           -> "/tmp/spark_checkpoint_mongo"
-    )
-
-    val dataStreamWriter = finalPredictions
+    // Write predictions to Kafka response topic
+    val kafkaSink = finalPredictions
+      .selectExpr("CAST(UUID AS STRING) as key", "to_json(struct(*)) as value")
       .writeStream
-      .format("mongodb")
-      .option("spark.mongodb.connection.uri", "mongodb://mongodb:27017")
-      .option("spark.mongodb.database", "agile_data_science")
-      .option("spark.mongodb.collection", "flight_delay_ml_response")
-      .option("checkpointLocation", "/tmp/spark_checkpoint_mongo")
+      .format("kafka")
+      .option("kafka.bootstrap.servers", "kafka:9092")
+      .option("topic", "flight-delay-ml-response")
+      .option("checkpointLocation", "/tmp/spark_checkpoint_kafka")
       .outputMode("append")
+      .start()
 
-    // run the query
-    val query = dataStreamWriter.start()
-    // Console Output for predictions
-
+    // Console output for debug
     val consoleOutput = finalPredictions.writeStream
       .outputMode("append")
       .format("console")

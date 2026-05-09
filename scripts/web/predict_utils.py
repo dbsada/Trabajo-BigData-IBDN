@@ -1,36 +1,39 @@
 import sys, os, re
+import time
 import pymongo
 import datetime, iso8601
 
-def process_search(results):
-  """(Eliminado: procesamiento de resultados de elasticsearch)"""
-  # Esta función ya no es necesaria si no se usa elasticsearch
-  return [], 0
-
-def get_navigation_offsets(offset1, offset2, increment):
-  """Calculate offsets for fetching lists of flights from MongoDB"""
-  offsets = {}
-  offsets['Next'] = {'top_offset': offset2 + increment, 'bottom_offset':
-  offset1 + increment}
-  offsets['Previous'] = {'top_offset': max(offset2 - increment, 0),
- 'bottom_offset': max(offset1 - increment, 0)} # Don't go < 0
-  return offsets
-
-def strip_place(url):
-  """Strip the existing start and end parameters from the query string"""
-  try:
-    p = re.match('(.+)\?start=.+&end=.+', url).group(1)
-  except AttributeError as e:
-    return url
-  return p
+def get_cassandra_session():
+  if not hasattr(get_cassandra_session, '_session'):
+    from cassandra.cluster import Cluster
+    cluster = Cluster(['cassandra'], port=9042)
+    for _ in range(5):
+      try:
+        get_cassandra_session._session = cluster.connect('agile_data_science')
+        break
+      except Exception:
+        time.sleep(2)
+    if not hasattr(get_cassandra_session, '_session'):
+      get_cassandra_session._session = None
+  return get_cassandra_session._session
 
 def get_flight_distance(client, origin, dest):
-  """Get the distance between a pair of airport codes"""
-  query = {
+  db_mode = os.getenv('DB_MODE', 'cassandra')
+  if db_mode == 'cassandra':
+    session = get_cassandra_session()
+    if session:
+      row = session.execute(
+        "SELECT distance FROM origin_dest_distances WHERE origin=%s AND dest=%s",
+        (origin, dest)
+      ).one()
+      if row:
+        return row.distance
+      return None
+  
+  record = client.agile_data_science.origin_dest_distances.find_one({
     "Origin": origin,
     "Dest": dest,
-  }
-  record = client.agile_data_science.origin_dest_distances.find_one(query)
+  })
   return record["Distance"]
 
 def get_regression_date_args(iso_date):

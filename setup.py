@@ -9,6 +9,11 @@ import rich
 from rich.prompt import Prompt, Confirm
 from rich.panel import Panel
 from rich.console import Console
+from rich.live import Live
+from rich.table import Table
+from rich.text import Text
+from rich.align import Align
+from rich import box
 import questionary
 from prompt_toolkit.shortcuts import CompleteStyle
 from typing import Literal
@@ -20,10 +25,21 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("logs/orchestrator.log"), # Al archivo
-        logging.StreamHandler()                      # A la pantalla
+        logging.FileHandler("logs/orchestrator.log")
     ]
 )
+
+_status_line = ""
+console = Console()
+
+def set_status(text):
+    global _status_line
+    if _status_line:
+        sys.stdout.write(f"\033[1A\033[K{text}\n")
+    else:
+        sys.stdout.write(f"{text}\n")
+    sys.stdout.flush()
+    _status_line = text
 
 class ClusterManager:
   def __init__(self):
@@ -86,42 +102,112 @@ class ClusterManager:
         except requests.ConnectionError:
             time.sleep(1)
     return False
+
+  def _check_port(self, port, host='localhost', timeout=0.5):
+    try:
+      with socket.create_connection((host, port), timeout=timeout):
+        return True
+    except:
+      return False
+
+  def _get_vm_ip(self):
+    try:
+      return subprocess.run(
+        ['hostname', '-I'], capture_output=True, text=True, check=True
+      ).stdout.strip().split()[0]
+    except:
+      return 'localhost'
+
+  def _build_svc_table(self, services):
+    vm_ip = self._get_vm_ip()
+    table = Table(box=box.ROUNDED, title="Starting Services")
+    table.add_column("Service", style="cyan", min_width=12)
+    table.add_column("Status", justify="center", min_width=6, max_width=8)
+    table.add_column("Port", style="dim", justify="center", min_width=6, max_width=8)
+    table.add_column("URL", style="dim", justify="center", min_width=20)
+    for s in services:
+      status = s.get("status", "·")
+      url = ""
+      if s["name"] in ("Flask", "MinIO", "Spark"):
+        url = f"http://{vm_ip}:{s['port']}"
+      table.add_row(s["name"], status, str(s["port"]) if s.get("port") else "-", url)
+    return table
     
   class DockerMode:
     def __init__(self, manager):
       self.m = manager
-      self.mongo = self.Mongo(manager)
-      self.cassandra = self.Cassandra(manager)
+      self.db = self.Database(manager)
       self.spark = self.Spark(manager)
       self.kafka = self.Kafka(manager)
     
     def start_services(self, db: Literal['mongo', 'cassandra']):
+      global _status_line
+      _status_line = ""
       logging.info('🚀 Iniciando servicios con Docker Compose...')
+      os.environ['DB_MODE'] = db
       self.m._run_command(f'docker compose --profile db_{db} up -d', cwd=self.m.project_home)
-      
-      self.m._wait_for_port(int(os.getenv('KAFKA_PORT', '9092')))
-      logging.info('Kafka está listo.')
 
-      if db == 'mongo':
-        port = int(os.getenv('MONGODB_PORT', '27017'))
-        self.m._wait_for_port(port)
-        logging.info('MongoDB está listo.')
-      elif db == 'cassandra':
-        port = int(os.getenv('CASSANDRA_PORT', '9042'))
-        self.m._wait_for_port(port)
-        logging.info('Cassandra está listo.')
-      else:
-        logging.error(f'Base de datos no soportada: {db}')
-        raise ValueError(f'Base de datos no soportada: {db}')
+      db_label = "MongoDB" if db == 'mongo' else "Cassandra"
+      db_port = int(os.getenv('MONGODB_PORT', '27017')) if db == 'mongo' else int(os.getenv('CASSANDRA_PORT', '9042'))
 
-      self.m._wait_for_port(int(os.getenv('SPARK_MASTER_UI_PORT', '8080')))
-      logging.info('Spark Master está listo.')
-      
-      self.m._wait_for_port(int(os.getenv('FLASK_PORT', '5001')))
-      logging.info('Servicio de API Flask está listo.')
+      services = [
+        {"name": "Kafka",   "port": int(os.getenv('KAFKA_PORT', '9092')),         "ready": False},
+        {"name": db_label,  "port": db_port,                                        "ready": False},
+        {"name": "Spark",   "port": int(os.getenv('SPARK_MASTER_UI_PORT', '8080')),"ready": False},
+        {"name": "Flask",   "port": int(os.getenv('FLASK_PORT', '5001')),           "ready": False},
+        {"name": "MinIO",   "port": int(os.getenv('MINIO_API_PORT', '9000')),       "ready": False},
+      ]
 
-      self.m._wait_for_port(int(os.getenv('MINIO_API_PORT', '9000')))
-      logging.info('MinIO (S3) está listo.')
+      cassandra_nodetool_pending = False
+      cassandra_cql_pending = False
+      spinner = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+      frame = 0
+
+      with Live(Align.center(self.m._build_svc_table(services)), refresh_per_second=10, screen=False) as live:
+        while not all(s["ready"] for s in services):
+          frame += 1
+          for s in services:
+            if s["ready"]:
+              s["status"] = "✓"
+            elif self.m._check_port(s["port"]):
+              if s["name"] == "Cassandra":
+                if not cassandra_nodetool_pending and not cassandra_cql_pending:
+                  cassandra_nodetool_pending = True
+                s["status"] = spinner[frame % len(spinner)]
+              else:
+                s["ready"] = True
+                s["status"] = "✓"
+            else:
+              s["status"] = spinner[frame % len(spinner)]
+
+          if cassandra_nodetool_pending:
+            node_un = subprocess.run(
+              f"docker exec {os.getenv('CASSANDRA_CONTAINER', 'cassandra')} "
+              f"nodetool status 2>&1 | grep -q '^UN'",
+              shell=True, capture_output=True
+            ).returncode == 0
+            if node_un:
+              cassandra_nodetool_pending = False
+              cassandra_cql_pending = True
+
+          if cassandra_cql_pending:
+            cql_ready = subprocess.run(
+              f"docker exec {os.getenv('CASSANDRA_CONTAINER', 'cassandra')} "
+              f"cqlsh -e 'DESCRIBE KEYSPACES' 2>/dev/null",
+              shell=True, capture_output=True
+            ).returncode == 0
+            if cql_ready:
+              for s in services:
+                if s["name"] == "Cassandra":
+                  s["ready"] = True
+                  s["status"] = "✓"
+              cassandra_cql_pending = False
+
+          live.update(Align.center(self.m._build_svc_table(services)))
+          time.sleep(0.08)
+
+      _status_line = ""
+      logging.info('Todos los servicios están listos.')
 
     def show_service_logs(self, service_name: str):
       '''
@@ -136,21 +222,17 @@ class ClusterManager:
       cmd = f"less -S +G {log_file}"
       subprocess.run(cmd, shell=True)
 
-    class Mongo:
+    class Database:
       def __init__(self, manager):
         self.m = manager
 
       def import_distances(self):
-        logging.info("📊 Importando distancias a MongoDB...")
+        # DB_MODE ('mongo' o 'cassandra') se decide en start_services()
+        # y lo resuelve internamente scripts/import_distances.py
+        db_mode = os.getenv('DB_MODE', 'cassandra')
+        label = "Cassandra" if db_mode == 'cassandra' else "MongoDB"
+        logging.info(f"📊 Importando distancias a {label}...")
         return self.m.run_local_script('import_distances.py')
-
-    class Cassandra:
-      def __init__(self, manager):
-        self.m = manager
-
-      def import_distances(self):
-        logging.info("📊 Importando distancias a Cassandra...")
-        raise NotImplementedError('Importación a Cassandra no implementada aún.')
 
     class Spark:
       def __init__(self, manager):
@@ -176,11 +258,6 @@ class ClusterManager:
       def predict_delay(self):
         logging.info("🧠 Lanzando predicción en Spark...")
         spark_master = os.getenv('SPARK_MASTER_URL', 'spark://spark:7077')
-        spark_packages = os.getenv('SPARK_PACKAGES', 
-          'org.mongodb.spark:mongo-spark-connector_2.13:10.4.1,'
-          'org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.1,'
-          'org.apache.hadoop:hadoop-aws:3.4.1,'
-          'software.amazon.awssdk:bundle:2.25.70')
         minio_endpoint = os.getenv('MINIO_ENDPOINT', 'http://minio:9000')
         access_key = os.getenv('MINIO_ROOT_USER', 'admin')
         secret_key = os.getenv('MINIO_ROOT_PASSWORD', 'password')
@@ -189,7 +266,6 @@ class ClusterManager:
         
         cmd = (
           f"docker exec {self.container_name} spark-submit "
-          f"--packages {spark_packages} "
           f"--master {spark_master} "
           f"--deploy-mode cluster "
           f"--conf spark.hadoop.fs.s3a.endpoint={minio_endpoint} "
@@ -231,75 +307,91 @@ class ClusterManager:
 def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
   manager = ClusterManager()
 
-  manager.docker.start_services(db=db)
-
-  result = manager.run_local_script('create_bucket.py')
-  if result is None:
-    logging.error("❌ Fallo en create_bucket.py. Abortando.")
-    sys.exit(1)
-
-  result = manager.run_local_script('download_data.py')
-  if result is None:
-    logging.error("❌ Fallo en download_data.py. Abortando.")
-    sys.exit(1)
-
-  if db == 'mongo':
-    result = manager.docker.mongo.import_distances()
-  elif db == 'cassandra':
-    result = manager.docker.cassandra.import_distances()
-  if result is None:
-    logging.error("❌ Fallo en import_distances. Abortando.")
-    sys.exit(1)
-  
-  result = manager.docker.kafka.create_topic(os.getenv('KAFKA_TOPIC', 'flight-delay-ml-request'))
-  if result is None:
-    logging.error("❌ Fallo en create_topic. Abortando.")
-    sys.exit(1)
-
-  result = manager.docker.spark.train_model()
-  if result is None:
-    logging.error("❌ Fallo en train_model. Abortando.")
-    sys.exit(1)
-
-  result = manager.docker.spark.predict_delay()
-  if result is None:
-    logging.error("❌ Fallo en predict_delay. Abortando.")
-    sys.exit(1)
-
-  flk_port = os.getenv('FLASK_PORT', '5001')
-  manager._wait_for_http(f"http://localhost:{flk_port}/flights/delays/predict_kafka", timeout=30)
-
-  rich.print(f"\nAccede a la API de predicciones en: [bold blue]http://localhost:{flk_port}/flights/delays/predict_kafka[/bold blue]")
-
-  rich.print("\n[bold green]🚀  SERVICIOS:[/bold green]")
-  rich.print("─" * 40)
+  with console.status("[dim]Cleaning previous sessions[/dim]", spinner="dots"):
+    subprocess.run('docker compose --profile db_mongo --profile db_cassandra down 2>/dev/null',
+      shell=True, cwd=manager.project_home, capture_output=True)
 
   try:
+    manager.docker.start_services(db=db)
+
+    vm_ip = 'localhost'
+    try:
+      vm_ip = subprocess.run(
+        ['hostname', '-I'], capture_output=True, text=True, check=True
+      ).stdout.strip().split()[0]
+    except Exception:
+      pass
+
+    with console.status("[dim]Creating MinIO bucket[/dim]", spinner="dots"):
+      result = manager.run_local_script('create_bucket.py')
+    if result is None:
+      logging.error("Fallo en create_bucket.py. Abortando.")
+      return
+    set_status("Bucket created \u2713")
+
+    with console.status("[dim]Downloading data[/dim]", spinner="dots"):
+      result = manager.run_local_script('download_data.py')
+    if result is None:
+      logging.error("Fallo en download_data.py. Abortando.")
+      return
+    set_status("Data downloaded \u2713")
+
+    with console.status("[dim]Importing distances to Cassandra[/dim]", spinner="dots"):
+      result = manager.docker.db.import_distances()
+    if result is None:
+      logging.error("Fallo en import_distances. Abortando.")
+      return
+    set_status("Distances imported \u2713")
+
+    with console.status("[dim]Creating Kafka topics[/dim]", spinner="dots"):
+      result = manager.docker.kafka.create_topic(os.getenv('KAFKA_TOPIC', 'flight-delay-ml-request'))
+      if result is not None:
+        result = manager.docker.kafka.create_topic(os.getenv('KAFKA_RESPONSE_TOPIC', 'flight-delay-ml-response'))
+    if result is None:
+      logging.error("Fallo en create_topic. Abortando.")
+      return
+    set_status("Kafka topics created \u2713")
+
+    with console.status("[dim]Starting Spark streaming job[/dim]", spinner="dots"):
+      result = manager.docker.spark.predict_delay()
+    if result is None:
+      logging.error("Fallo en predict_delay. Abortando.")
+      return
+    set_status("Spark streaming running \u2713")
+
+    flk_port = os.getenv('FLASK_PORT', '5001')
+    manager._wait_for_http(f"http://{vm_ip}:{flk_port}/flights/delays/predict_kafka", timeout=30)
+
+    set_status(f"API ready: http://{vm_ip}:{flk_port}/flights/delays/predict_kafka")
+    set_status("")
+
+    rich.print("\n[bold]Cluster ready[/bold]  ·  [dim]Press Ctrl+C to shutdown[/dim]")
+    rich.print("[dim]" + "─" * (console.width-2) + "[/dim]")
+
     while True:
       main_choice = questionary.select(
         "ibdn@cluster",
-        choices=[
-          "📋 Menú de logs",
-          "🛑 Apagar el cluster",
-        ]
+        choices=[ "📋 Menú de logs" ]
       ).ask()
 
-      if main_choice is None or main_choice == "🛑 Apagar el cluster":
+      if main_choice is None:
         break
 
       if main_choice == "📋 Menú de logs":
+        db_label = "MongoDB" if db == 'mongo' else "Cassandra"
+        db_service = "mongodb" if db == 'mongo' else "cassandra"
         log_services = [
           "Kafka",
           "Spark (Master)",
           "Spark Worker",
           "Predicción Spark MLlib",
-          "MongoDB",
+          db_label,
           "Flask",
           "MinIO",
           "← Volver",
         ]
-        rich.print("\n   [dim]Servicios: Kafka / Spark (Master) / Spark Worker /")
-        rich.print("   Predicción MLlib / MongoDB / Flask / MinIO[/dim]")
+        rich.print(f"\n   [dim]Servicios: Kafka / Spark (Master) / Spark Worker /\n"
+                   f"   Predicción MLlib / {db_label} / Flask / MinIO[/dim]")
         while True:
           log_choice = questionary.autocomplete(
             "📋 Filtrar:",
@@ -318,52 +410,79 @@ def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
             manager.docker.show_service_logs("spark-worker")
           elif log_choice == "Predicción Spark MLlib":
             manager.docker.spark.show_prediction_logs()
-          elif log_choice == "MongoDB":
-            manager.docker.show_service_logs("mongodb")
+          elif log_choice == db_label:
+            manager.docker.show_service_logs(db_service)
           elif log_choice == "Flask":
             manager.docker.show_service_logs("flask")
           elif log_choice == "MinIO":
             manager.docker.show_service_logs("minio")
 
   except KeyboardInterrupt:
-    rich.print("\n[bold red]🛑 Apagando el cluster...[/bold red]")
-    manager._run_command('docker compose down', cwd=manager.project_home)
-    rich.print("[grey70]Contenedores detenidos. ¡Hasta pronto![/grey70]")
+    set_status("Shutting down cluster...")
+  finally:
+    with console.status("[dim]Stopping containers[/dim]", spinner="dots"):
+      manager._run_command(
+        'docker compose --profile db_mongo --profile db_cassandra down',
+        cwd=manager.project_home)
+    _status_line = ""
+    set_status("Containers stopped. Goodbye!")
 
 def main_kubernetes(db: Literal['mongo', 'cassandra']):
   raise NotImplementedError('Función main_kubernetes no implementada aún.')
 
 if __name__ == '__main__':
-    console = Console()
-    
-    console.print("[bold cyan]╔════════════════════════════════════════════╗[/bold cyan]")
-    console.print("[bold cyan]║      IBDN CLUSTER ORCHESTRATOR v1.0        ║[/bold cyan]")
-    console.print("[bold cyan]╚════════════════════════════════════════════╝[/bold cyan]\n")
+  os.system('clear')
+  print()
+  title_panel = Panel(
+      Align.center(Text.assemble(
+          ("\nCluster Orchestrator", "bold white"),
+          (" · ", "dim white"),
+          ("v2.0\n", "bold cyan"),
+          ("Flight Delay Prediction\n", "dim white"),
+      )),
+      border_style="bright_blue",
+      title="[bold bright_blue]✈ IBDN ✈[/bold bright_blue]",
+      title_align="center",
+      padding=(0, 2),
+      box=box.HEAVY,
+  )
+  console.print(title_panel)
+  console.print()
 
-    infra = questionary.select(
-        "¿Qué infraestructura deseas usar?",
-        choices=[
-            "Docker",
-            "Kubernetes"
-        ],
-        default="Docker"
-    ).ask()
+  infra = questionary.select(
+      "¿Qué infraestructura deseas usar?",
+      choices=[
+          "Docker",
+          "Kubernetes"
+      ],
+      default="Docker"
+  ).ask()
 
-    db_choice = questionary.select(
-        "¿Qué base de datos quieres levantar?",
-        choices=[
-            "MongoDB",
-            "Cassandra"
-        ],
-        default="MongoDB"
-    ).ask()
+  db_choice = questionary.select(
+      "¿Qué base de datos quieres levantar?",
+      choices=[
+          "MongoDB",
+          "Cassandra"
+      ],
+      default="Cassandra"
+  ).ask()
 
-    infra_mode = "docker" if "Docker" in infra else "kubernetes"
-    db = "mongo" if "MongoDB" in db_choice else "cassandra"
+  # Clear 2 lines of questions from terminal
+  sys.stdout.write("\033[1A\033[2K\033[1A\033[2K")
+  sys.stdout.flush()
 
-    console.print(f"\n[bold green]⚙️ Configuración seleccionada:[/bold green] [white]{infra_mode} + {db}[/white]\n")
+  infra_mode = "docker" if "Docker" in infra else "kubernetes"
+  db = "mongo" if "MongoDB" in db_choice else "cassandra"
+  db_label = "MongoDB" if db == 'mongo' else "Cassandra"
 
-    if infra_mode == "docker":
-      main_docker(db=db)
-    elif infra_mode == "kubernetes":
-      main_kubernetes(db=db)
+  console.print(Align.center(Text.assemble(
+      ("⚙️ ", "bold yellow"),
+      ("Docker", "bold white"),
+      (" + ", "dim white"),
+      (db_label, "bold cyan"),
+  )))
+
+  if infra_mode == "docker":
+    main_docker(db=db)
+  elif infra_mode == "kubernetes":
+    main_kubernetes(db=db)

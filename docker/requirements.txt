@@ -1,5 +1,8 @@
 flask==2.2.5
+flask-socketio==5.3.6
+simple-websocket==1.0.0
 pymongo
+cassandra-driver
 kafka-python
 requests
 iso8601

@@ -10,3 +10,4 @@ requests==2.33.1
 rich==15.0.0
 urllib3==2.6.3
 wcwidth==0.6.0
+cassandra-driver==3.29.2

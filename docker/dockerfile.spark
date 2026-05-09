@@ -19,7 +19,31 @@ RUN curl -L https://downloads.apache.org/spark/spark-$SPARK_VERSION/spark-$SPARK
 RUN curl -L -o /opt/spark/jars/iceberg-spark-runtime-4.0_2.13-1.10.1.jar \
   https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-4.0_2.13/1.10.1/iceberg-spark-runtime-4.0_2.13-1.10.1.jar
 
-# 5. Spark default config (Iceberg + S3A/MinIO)
+# 4. S3A + AWS SDK (necesario para cluster mode)
+RUN curl -L -o /opt/spark/jars/hadoop-aws-3.4.1.jar \
+  https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/3.4.1/hadoop-aws-3.4.1.jar && \
+  curl -L -o /opt/spark/jars/bundle-2.25.70.jar \
+  https://repo1.maven.org/maven2/software/amazon/awssdk/bundle/2.25.70/bundle-2.25.70.jar
+
+# 5. MongoDB Spark connector + MongoDB driver + Spark SQL Kafka (cluster mode)
+RUN curl -L -o /opt/spark/jars/mongo-spark-connector_2.13-10.4.1.jar \
+  https://repo1.maven.org/maven2/org/mongodb/spark/mongo-spark-connector_2.13/10.4.1/mongo-spark-connector_2.13-10.4.1.jar && \
+  curl -L -o /opt/spark/jars/mongodb-driver-sync-5.1.2.jar \
+  https://repo1.maven.org/maven2/org/mongodb/mongodb-driver-sync/5.1.2/mongodb-driver-sync-5.1.2.jar && \
+  curl -L -o /opt/spark/jars/mongodb-driver-core-5.1.2.jar \
+  https://repo1.maven.org/maven2/org/mongodb/mongodb-driver-core/5.1.2/mongodb-driver-core-5.1.2.jar && \
+  curl -L -o /opt/spark/jars/bson-5.1.2.jar \
+  https://repo1.maven.org/maven2/org/mongodb/bson/5.1.2/bson-5.1.2.jar && \
+  curl -L -o /opt/spark/jars/spark-sql-kafka-0-10_2.13-4.1.1.jar \
+  https://repo1.maven.org/maven2/org/apache/spark/spark-sql-kafka-0-10_2.13/4.1.1/spark-sql-kafka-0-10_2.13-4.1.1.jar && \
+  curl -L -o /opt/spark/jars/spark-token-provider-kafka-0-10_2.13-4.1.1.jar \
+  https://repo1.maven.org/maven2/org/apache/spark/spark-token-provider-kafka-0-10_2.13/4.1.1/spark-token-provider-kafka-0-10_2.13-4.1.1.jar && \
+  curl -L -o /opt/spark/jars/kafka-clients-3.9.1.jar \
+  https://repo1.maven.org/maven2/org/apache/kafka/kafka-clients/3.9.1/kafka-clients-3.9.1.jar && \
+  curl -L -o /opt/spark/jars/commons-pool2-2.12.1.jar \
+  https://repo1.maven.org/maven2/org/apache/commons/commons-pool2/2.12.1/commons-pool2-2.12.1.jar
+
+# 6. Spark default config (Iceberg + S3A/MinIO)
 COPY docker/spark-defaults.conf /opt/spark/conf/spark-defaults.conf
 
 RUN pip3 install numpy pyspark findspark --break-system-packages
