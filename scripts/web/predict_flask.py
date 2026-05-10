@@ -24,6 +24,7 @@ KAFKA_BOOTSTRAP_SERVERS = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka:9092')
 KAFKA_LOCAL_BOOTSTRAP_SERVERS = os.getenv('KAFKA_LOCAL_BOOTSTRAP_SERVERS', 'localhost:9092')
 KAFKA_TOPIC = os.getenv('KAFKA_TOPIC', 'flight-delay-ml-request')
 KAFKA_RESPONSE_TOPIC = os.getenv('KAFKA_RESPONSE_TOPIC', 'flight-delay-ml-response')
+KAFKA_STATUS_TOPIC = os.getenv('KAFKA_STATUS_TOPIC', 'flight-delay-ml-status')
 
 client = MongoClient(MONGODB_URI)
 db = client[MONGODB_DATABASE]
@@ -44,6 +45,24 @@ def inject_arch_info():
         KAFKA_RESPONSE_TOPIC=os.getenv('KAFKA_RESPONSE_TOPIC', 'flight-delay-ml-response'),
     )
 
+_airport_cache = None
+
+@app.route("/api/airports")
+def api_airports():
+    global _airport_cache
+    if _airport_cache is None:
+        import bz2, json
+        codes = set()
+        with bz2.open('/app/data/simple_flight_delay_features.jsonl.bz2', 'rt') as f:
+            for line in f:
+                r = json.loads(line)
+                codes.add(r.get('Origin'))
+                codes.add(r.get('Dest'))
+        _airport_cache = sorted(codes)
+    q = request.args.get('q', '').upper()
+    match = [a for a in _airport_cache if a.startswith(q)] if q else _airport_cache
+    return json_util.dumps(match[:50])
+
 # Setup Kafka
 from kafka import KafkaProducer, KafkaConsumer
 
@@ -59,8 +78,10 @@ producer = None
 PREDICTION_TOPIC = KAFKA_TOPIC
 
 def get_producer():
-    p = KafkaProducer(bootstrap_servers=[KAFKA_BOOTSTRAP_SERVERS])
-    return p
+    if not hasattr(get_producer, '_p'):
+        get_producer._p = KafkaProducer(bootstrap_servers=[KAFKA_BOOTSTRAP_SERVERS],
+                                         max_block_ms=10000)
+    return get_producer._p
 
 # Persist prediction based on DB_MODE
 def persist_prediction(data):
@@ -107,6 +128,8 @@ def ensure_consumer():
         ensure_consumer._started = True
         t = threading.Thread(target=_kafka_response_listener, daemon=True)
         t.start()
+        s = threading.Thread(target=_kafka_status_listener, daemon=True)
+        s.start()
 
 def _kafka_response_listener():
   consumer = KafkaConsumer(
@@ -119,10 +142,26 @@ def _kafka_response_listener():
     try:
       data = json.loads(msg.value.decode('utf-8'))
       if isinstance(data, dict) and 'UUID' in data:
+        socketio.emit('spark_status', {'status': 'PROCESSING'}, room=data.get('UUID', ''))
         persist_prediction(data)
+        socketio.emit('saved', data, room=data.get('UUID', ''))
         socketio.emit('prediction', data, room=data.get('UUID', ''))
     except Exception as e:
       print(f"Consumer error: {e}")
+
+def _kafka_status_listener():
+  consumer = KafkaConsumer(
+    KAFKA_STATUS_TOPIC,
+    bootstrap_servers=[KAFKA_BOOTSTRAP_SERVERS],
+    auto_offset_reset='latest'
+  )
+  for msg in consumer:
+    try:
+      status = msg.value.decode('utf-8')
+      print(f"Status event: {status}")
+      socketio.emit('spark_status', {'status': status})
+    except Exception as e:
+      print(f"Status error: {e}")
 
 import uuid
 
@@ -293,11 +332,11 @@ def airline(carrier_code):
 @app.route("/")
 def index():
   form_config = [
-    {'field': 'DepDelay', 'label': 'Departure Delay', 'value': 5},
-    {'field': 'Carrier', 'value': 'AA'},
-    {'field': 'FlightDate', 'label': 'Date', 'value': '2016-12-25'},
-    {'field': 'Origin', 'value': 'ATL'},
-    {'field': 'Dest', 'label': 'Destination', 'value': 'SFO'}
+    {'field': 'DepDelay', 'label': 'Departure Delay', 'value': 5, 'type': 'number'},
+    {'field': 'Carrier', 'value': 'AA', 'type': 'text'},
+    {'field': 'FlightDate', 'label': 'Date', 'value': '2016-12-25', 'type': 'date'},
+    {'field': 'Origin', 'value': 'ATL', 'type': 'text'},
+    {'field': 'Dest', 'label': 'Destination', 'value': 'SFO', 'type': 'text'},
   ]
   return render_template('flight_delays_predict_kafka.html', form_config=form_config)
 
@@ -571,8 +610,14 @@ def classify_flight_delays_realtime():
   
   message_bytes = json.dumps(prediction_features).encode()
   p = get_producer()
-  p.send(PREDICTION_TOPIC, message_bytes)
-  p.flush()
+  try:
+    future = p.send(PREDICTION_TOPIC, message_bytes)
+    future.add_callback(
+      lambda x: socketio.emit('kafka_ack', {'id': unique_id}, room=unique_id)
+    )
+    p.flush(timeout=10)
+  except Exception as e:
+    print(f"Kafka send error: {e}")
 
   response = {"status": "OK", "id": unique_id}
   return json_util.dumps(response)

@@ -4,16 +4,21 @@ import pymongo
 import datetime, iso8601
 
 def get_cassandra_session():
+  if os.getenv('DB_MODE', 'cassandra') != 'cassandra':
+    return None
   if not hasattr(get_cassandra_session, '_session'):
-    from cassandra.cluster import Cluster
-    cluster = Cluster(['cassandra'], port=9042)
-    for _ in range(5):
-      try:
-        get_cassandra_session._session = cluster.connect('agile_data_science')
-        break
-      except Exception:
-        time.sleep(2)
-    if not hasattr(get_cassandra_session, '_session'):
+    try:
+      from cassandra.cluster import Cluster
+      cluster = Cluster(['cassandra'], port=9042)
+      for _ in range(5):
+        try:
+          get_cassandra_session._session = cluster.connect('agile_data_science')
+          break
+        except Exception:
+          time.sleep(2)
+      if not hasattr(get_cassandra_session, '_session'):
+        get_cassandra_session._session = None
+    except Exception:
       get_cassandra_session._session = None
   return get_cassandra_session._session
 

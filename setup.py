@@ -354,6 +354,8 @@ def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
       result = manager.docker.kafka.create_topic(os.getenv('KAFKA_TOPIC', 'flight-delay-ml-request'))
       if result is not None:
         result = manager.docker.kafka.create_topic(os.getenv('KAFKA_RESPONSE_TOPIC', 'flight-delay-ml-response'))
+      if result is not None:
+        result = manager.docker.kafka.create_topic(os.getenv('KAFKA_STATUS_TOPIC', 'flight-delay-ml-status'))
     if result is None:
       logging.error("Fallo en create_topic. Abortando.")
       return

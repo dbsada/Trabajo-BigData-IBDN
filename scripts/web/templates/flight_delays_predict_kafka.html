@@ -5,123 +5,297 @@
       {% for item in form_config %}
         <div>
           <label for="{{item['field']}}">{{item.get('label', item['field'])}}</label>
-          <input name="{{item['field']}}" {% if 'value' in item %} value="{{item['value']}}"{% endif %}>
+          {% if item.field == 'Carrier' %}
+          <select name="{{item.field}}">
+            <option value="AA"{% if item.value == 'AA' %} selected{% endif %}>AA - American Airlines</option>
+            <option value="AS"{% if item.value == 'AS' %} selected{% endif %}>AS - Alaska Airlines</option>
+            <option value="B6"{% if item.value == 'B6' %} selected{% endif %}>B6 - JetBlue</option>
+            <option value="DL"{% if item.value == 'DL' %} selected{% endif %}>DL - Delta</option>
+            <option value="EV"{% if item.value == 'EV' %} selected{% endif %}>EV - ExpressJet</option>
+          </select>
+          {% elif item.field in ('Origin','Dest') %}
+          <input name="{{item['field']}}" type="text" value="{{item.get('value', '')}}"
+                 class="ac-airport" placeholder="Airport code" autocomplete="off">
+          {% elif item.type == 'date' %}
+          <input name="{{item['field']}}" type="date" value="{{item.get('value', '')}}">
+          {% elif item.type == 'number' %}
+          <input name="{{item['field']}}" type="number" value="{{item.get('value', '')}}" min="0" max="999">
+          {% else %}
+          <input name="{{item['field']}}" type="text" value="{{item.get('value', '')}}">
+          {% endif %}
         </div>
       {% endfor %}
-      <div class="full" style="text-align: right; margin-top: 0.3rem;">
+      <div class="full" style="text-align: right; margin-top: 0.5rem;">
         <button type="submit" id="predict-btn">Predict</button>
       </div>
     </div>
   </form>
-  <div class="result-box">Delay: <span id="result"></span></div>
+  <div class="result-box">
+    <svg id="route-svg" viewBox="0 0 240 32" width="100%" style="overflow:visible;margin-bottom:0.75rem">
+      <defs>
+        <marker id="route-arrow" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="5" markerHeight="5" orient="auto">
+          <path d="M0 0 L8 4 L0 8 z" fill="#60a5fa"/>
+        </marker>
+      </defs>
+      <text id="route-origin" x="16" y="20" fill="#e0e0e8" font-size="11" font-family="inherit" font-weight="700" text-anchor="middle" letter-spacing="0.5">ATL</text>
+      <text id="route-dest" x="224" y="20" fill="#e0e0e8" font-size="11" font-family="inherit" font-weight="700" text-anchor="middle" letter-spacing="0.5">SFO</text>
+      <path id="route-path" d="M 30 16 Q 120 -2 200 16" fill="none" stroke="#3a3a4e" stroke-width="2"/>
+      <g id="route-plane" opacity="0">
+        <path d="M0,-3 L5,0 L0,3 L1.5,0 Z" fill="#60a5fa"/>
+        <animateMotion dur="2s" repeatCount="1" fill="freeze" begin="indefinite">
+          <mpath href="#route-path"/>
+        </animateMotion>
+      </g>
+    </svg>
+    <div class="result-label">Delay</div>
+    <div class="result-value" id="result"></div>
+  </div>
+
+<script>
+var AIRPORTS = null;
+
+$(document).on('focus', '.ac-airport', function() {
+  if (!AIRPORTS) {
+    fetch('/api/airports').then(function(r) { return r.json(); }).then(function(d) { AIRPORTS = d; });
+  }
+  showDropdown(this);
+}).on('input', '.ac-airport', function() {
+  showDropdown(this);
+  updateRouteLabels();
+}).on('blur', '.ac-airport', function() {
+  setTimeout(function() { hideDropdown(this); }.bind(this), 200);
+}).on('change', '.ac-airport', function() {
+  updateRouteLabels();
+});
+
+function updateRouteLabels() {
+  var origin = document.querySelector('input[name="Origin"]');
+  var dest = document.querySelector('input[name="Dest"]');
+  var oEl = document.getElementById('route-origin');
+  var dEl = document.getElementById('route-dest');
+  if (oEl && origin) oEl.textContent = origin.value || '---';
+  if (dEl && dest) dEl.textContent = dest.value || '---';
+}
+
+function showDropdown(input) {
+  var dd = getDropdown(input);
+  if (!AIRPORTS) { dd.style.display = 'none'; return; }
+  var val = input.value.toUpperCase();
+  var matches = val ? AIRPORTS.filter(function(a) { return a.indexOf(val) === 0; }) : AIRPORTS;
+  matches = matches.slice(0, 50);
+  if (matches.length === 0 || matches.length === 1 && matches[0] === input.value.toUpperCase()) {
+    dd.style.display = 'none'; return;
+  }
+  dd.innerHTML = matches.map(function(m) {
+    return '<div class="ac-item' + (m === val ? ' ac-sel' : '') + '" data-val="' + m + '">' + m + '</div>';
+  }).join('');
+  dd.style.display = 'block';
+}
+
+function hideDropdown(input) {
+  var dd = getDropdown(input);
+  if (dd) dd.style.display = 'none';
+}
+
+function getDropdown(input) {
+  var dd = input._dd;
+  if (!dd) {
+    dd = document.createElement('div');
+    dd.className = 'ac-dropdown';
+    input.parentNode.appendChild(dd);
+    dd.addEventListener('mousedown', function(e) {
+      var item = e.target.closest('.ac-item');
+      if (item) { input.value = item.dataset.val; hideDropdown(input); $(input).trigger('change'); }
+    });
+    input._dd = dd;
+  }
+  dd.style.cssText = 'left:0;top:' + (input.offsetHeight + 2) + 'px;width:' + input.offsetWidth + 'px';
+  return dd;
+}
+</script>
 {% endblock %}
 
 {% block arch %}
 <div class="arch" id="arch">
-  <div class="arch-title">Architecture</div>
+<div class="arch-title">ARCHITECTURE</div>
+<svg viewBox="0 0 380 380" width="100%" style="overflow:visible">
+  <defs>
+    <marker id="arrow" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" fill="currentColor"/>
+    </marker>
+  </defs>
 
-  <div class="node" id="node-browser"><span class="dot" style="background:#888"></span><span class="label">Browser</span><span class="badge">you</span></div>
-  <div class="arrow-row" id="step-0"><span class="arrow">→</span> POST /predict <span class="topic">HTTP</span></div>
+  <rect x="0" y="0" width="380" height="380" rx="10" fill="none" stroke="#444" stroke-width="1.5" stroke-dasharray="5,4"/>
+  <text x="14" y="20" fill="#888" font-size="11" font-family="inherit" font-weight="500">Docker</text>
 
-  <div class="node" id="node-flask"><span class="dot" style="background:#3b82f6"></span><span class="label">Flask</span><span class="badge">web app</span></div>
-  <div class="arrow-row" id="step-1"><span class="arrow">→</span> <span class="topic">{{ KAFKA_TOPIC }}</span></div>
+  <rect id="sv-spark" x="60" y="48" width="180" height="40" rx="6" fill="#1e1e2a" stroke="#fdc41b" stroke-width="2" class="sv-node"/>
+  <text x="150" y="68" fill="#d0d0d8" font-size="12" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">SPARK</text>
 
-  <div class="node" id="node-kafka"><span class="dot" style="background:#f59e0b"></span><span class="label">Kafka</span><span class="badge">broker</span></div>
-  <div class="arrow-row" id="step-2"><span class="arrow">→</span> streaming read</div>
+  <rect id="sv-bbdd" x="255" y="48" width="80" height="40" rx="6" fill="#1e1e2a" stroke="#2f9e44" stroke-width="2" class="sv-node"/>
+  {% if DB_MODE == 'cassandra' %}
+  <text x="295" y="68" fill="#d0d0d8" font-size="10" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">CASSANDRA</text>
+  {% else %}
+  <text x="295" y="68" fill="#d0d0d8" font-size="11" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">MONGODB</text>
+  {% endif %}
 
-  <div class="node" id="node-spark"><span class="dot" style="background:#ef4444"></span><span class="label">Spark</span><span class="badge">ML predict</span></div>
-  <div class="arrow-row" id="step-3"><span class="arrow">→</span> <span class="topic">{{ KAFKA_RESPONSE_TOPIC }}</span></div>
+  <rect id="sv-kafka-l" x="70" y="163" width="80" height="36" rx="6" fill="#1e1e2a" stroke="#9c36b5" stroke-width="2" class="sv-node"/>
+  <text x="110" y="181" fill="#d0d0d8" font-size="11" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">KAFKA</text>
 
-  <div class="node" id="node-kafka-r"><span class="dot" style="background:#f59e0b"></span><span class="label">Kafka</span><span class="badge">response</span></div>
-  <div class="arrow-row" id="step-4"><span class="arrow">→</span> consumer</div>
+  <rect id="sv-kafka-r" x="160" y="163" width="80" height="36" rx="6" fill="#1e1e2a" stroke="#9c36b5" stroke-width="2" class="sv-node"/>
+  <text x="200" y="181" fill="#d0d0d8" font-size="11" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">KAFKA</text>
 
-  <div class="node" id="node-flask2"><span class="dot" style="background:#3b82f6"></span><span class="label">Flask</span><span class="badge">WebSocket</span></div>
-  <div class="arrow-row" id="step-5"><span class="arrow">→</span> <span class="topic">WebSocket</span></div>
+  <rect x="58" y="150" width="194" height="62" rx="8" fill="none" stroke="#555" stroke-width="1" stroke-dasharray="3,3"/>
 
-  <div style="display:flex; gap:0.5rem; margin-top:0.5rem;">
-    {% if DB_MODE == 'cassandra' %}
-    <div class="node" id="node-cassandra"><span class="dot" style="background:#22c55e"></span><span class="label">Cassandra</span></div>
-    <div class="node db-inactive" id="node-mongo"><span class="dot" style="background:#555"></span><span class="label">MongoDB</span></div>
-    {% else %}
-    <div class="node db-inactive" id="node-cassandra"><span class="dot" style="background:#555"></span><span class="label">Cassandra</span></div>
-    <div class="node" id="node-mongo"><span class="dot" style="background:#22c55e"></span><span class="label">MongoDB</span></div>
-    {% endif %}
-    <div class="node"><span class="dot" style="background:#8b5cf6"></span><span class="label">MinIO</span></div>
-  </div>
+  <rect id="sv-flask" x="60" y="280" width="180" height="40" rx="6" fill="#1e1e2a" stroke="#1971c2" stroke-width="2" class="sv-node"/>
+  <text x="150" y="300" fill="#d0d0d8" font-size="12" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">FLASK</text>
+
+  <rect x="130" y="328" width="120" height="18" rx="4" fill="#1e1e2a" stroke="#2a2a3a" stroke-width="1"/>
+  <rect x="140" y="333" width="7" height="7" rx="2" fill="#60a5fa"/>
+  <text x="153" y="341" fill="#888" font-size="9" font-family="inherit">active</text>
+  <rect x="193" y="333" width="7" height="7" rx="2" fill="#22c55e"/>
+  <text x="206" y="341" fill="#888" font-size="9" font-family="inherit">done</text>
+
+  <g id="sv-a0" class="sv-arrow">
+    <path d="M 110 280 L 110 204" fill="none" stroke-width="5"/>
+    <polygon points="110,198 104,208 116,208"/>
+  </g>
+  <g id="sv-a1" class="sv-arrow">
+    <path d="M 110 163 L 110 93" fill="none" stroke-width="5"/>
+    <polygon points="110,87 104,97 116,97"/>
+  </g>
+  <g id="sv-a2" class="sv-arrow">
+    <path d="M 240 68 L 255 68" fill="none" stroke-width="5"/>
+    <polygon points="261,68 251,62 251,74"/>
+  </g>
+  <g id="sv-a3" class="sv-arrow">
+    <path d="M 200 88 L 200 158" fill="none" stroke-width="5"/>
+    <polygon points="200,164 194,154 206,154"/>
+  </g>
+  <g id="sv-a4" class="sv-arrow">
+    <path d="M 200 199 L 200 275" fill="none" stroke-width="5"/>
+    <polygon points="200,281 194,271 206,271"/>
+  </g>
+</svg>
 </div>
 
 <script src="https://cdn.socket.io/4.5.0/socket.io.min.js"></script>
 <script>
 const socket = io();
-const archSteps = [
-  { el: '#step-0', delay: 300 },
-  { el: '#step-1', delay: 800 },
-  { el: '#step-2', delay: 1000 },
-  { el: '#step-3', delay: 12000 },
-  { el: '#step-4', delay: 600  },
-  { el: '#step-5', delay: 400  },
-];
+const archArrows = ['#sv-a0','#sv-a1','#sv-a2','#sv-a3','#sv-a4'];
+const archNodes = ['sv-flask','sv-kafka-l','sv-spark','sv-kafka-r','sv-bbdd','sv-flask'];
 let stepIndex = 0;
-let stepTimers = [];
-const allNodes = ['node-browser','node-flask','node-kafka','node-spark','node-kafka-r','node-flask2','node-browser'];
+let archTimer = null;
 
 function resetArch() {
-  stepTimers.forEach(t => clearTimeout(t));
-  stepTimers = [];
+  if (archTimer) { clearTimeout(archTimer); archTimer = null; }
   stepIndex = 0;
-  document.querySelectorAll('#arch .arrow-row').forEach(e => e.classList.remove('active','fade'));
-  document.querySelectorAll('#arch .node').forEach(e => e.classList.remove('active'));
+  archArrows.forEach(function(s) { var e = document.querySelector(s); if (e) { e.classList.remove('s-active','s-done'); } });
+  archNodes.forEach(function(s) { var e = document.getElementById(s); if (e) e.classList.remove('s-active','s-done'); });
+  stopRouteAnimation();
 }
 
 function advanceArch() {
+  var arrowsOn = [[0],[1],[2,3],[4],[],[]];
+
   if (stepIndex > 0) {
-    const prev = document.querySelector(archSteps[stepIndex - 1].el);
-    prev.classList.remove('active');
-    prev.classList.add('fade');
-    setTimeout(() => prev.classList.remove('fade'), 600);
-    if (stepIndex - 1 < allNodes.length) {
-      const pn = document.querySelector('#' + allNodes[stepIndex - 1]);
-      if (pn) pn.classList.remove('active');
+    (arrowsOn[stepIndex - 1] || []).forEach(function(idx) {
+      if (idx < archArrows.length) {
+        var prev = document.querySelector(archArrows[idx]);
+        if (prev) { prev.classList.remove('s-active'); prev.classList.add('s-done'); }
+      }
+    });
+    if (stepIndex - 1 < archNodes.length) {
+      var pn = document.getElementById(archNodes[stepIndex - 1]);
+      if (pn) { pn.classList.remove('s-active'); pn.classList.add('s-done'); }
     }
   }
-  if (stepIndex < archSteps.length) {
-    document.querySelector(archSteps[stepIndex].el).classList.add('active');
-    if (stepIndex < allNodes.length) {
-      const n = document.querySelector('#' + allNodes[stepIndex]);
-      if (n) n.classList.add('active');
+  (arrowsOn[stepIndex] || []).forEach(function(idx) {
+    if (idx < archArrows.length) {
+      var el = document.querySelector(archArrows[idx]);
+      if (el) el.classList.add('s-active');
     }
-    stepTimers.push(setTimeout(advanceArch, archSteps[stepIndex].delay));
-    stepIndex++;
+  });
+  if (stepIndex < archNodes.length) {
+    var n = document.getElementById(archNodes[stepIndex]);
+    if (n) { n.classList.remove('s-done'); n.classList.add('s-active'); }
+  }
+  stepIndex++;
+
+  if (stepIndex < 6) {
+    var delays = [250, 600, 600, 300, 400];
+    archTimer = setTimeout(advanceArch, delays[stepIndex - 1]);
+  } else {
+    archTimer = setTimeout(function() {
+      var f = document.getElementById('sv-flask');
+      if (f) f.classList.remove('s-active');
+    }, 1200);
   }
 }
 
 $("#flight_delay_classification").submit(function(event) {
   event.preventDefault();
   resetArch();
+  startRouteAnimation();
   $("#predict-btn").prop('disabled', true).text('Sending...');
   var posting = $.post($(this).attr('action'), $(this).serialize());
   posting.done(function(data) {
     var response = JSON.parse(data);
     if (response.status == "OK") {
       advanceArch();
-      setTimeout(() => advanceArch(), 600);
       $("#result").empty().append("Processing...");
     }
   });
 });
 
-socket.on('prediction', function(data) {
-  stepTimers.forEach(t => clearTimeout(t));
-  stepTimers = [];
-  stepIndex = 3;
-  advanceArch();
-  setTimeout(() => advanceArch(), 600);
-  setTimeout(() => {
+socket.on('saved', function(data) {
+  if (archTimer) { clearTimeout(archTimer); archTimer = null; }
+  (function step() {
+    if (stepIndex >= 6) {
+      renderPage(data);
+      $("#predict-btn").prop('disabled', false).text('Predict');
+      setTimeout(function() { var f = document.getElementById('sv-flask'); if (f) f.classList.remove('s-active'); }, 1200);
+      return;
+    }
     advanceArch();
-    $("#predict-btn").prop('disabled', false).text('Predict');
-  }, 800);
-  renderPage(data);
+    setTimeout(step, 200);
+  })();
 });
+
+function startRouteAnimation() {
+  var origin = document.querySelector('input[name="Origin"]');
+  var dest = document.querySelector('input[name="Dest"]');
+  var oEl = document.getElementById('route-origin');
+  var dEl = document.getElementById('route-dest');
+  if (oEl && origin) oEl.textContent = origin.value || '---';
+  if (dEl && dest) dEl.textContent = dest.value || '---';
+  var svg = document.getElementById('route-svg');
+  var oldPlane = document.getElementById('route-plane');
+  if (oldPlane) oldPlane.remove();
+  var ns = 'http://www.w3.org/2000/svg';
+  var g = document.createElementNS(ns, 'g');
+  g.id = 'route-plane';
+  var planePath = document.createElementNS(ns, 'path');
+  planePath.setAttribute('d', 'M0,-4 L7,0 L0,4 L2,0 Z');
+  planePath.setAttribute('fill', '#60a5fa');
+  g.appendChild(planePath);
+  var anim = document.createElementNS(ns, 'animateMotion');
+  anim.setAttribute('dur', '1.5s');
+  anim.setAttribute('repeatCount', '1');
+  anim.setAttribute('fill', 'freeze');
+  var mpath = document.createElementNS(ns, 'mpath');
+  mpath.setAttribute('href', '#route-path');
+  anim.appendChild(mpath);
+  g.appendChild(anim);
+  svg.appendChild(g);
+  anim.beginElement();
+}
+
+function stopRouteAnimation() {
+  var plane = document.getElementById('route-plane');
+  if (plane) plane.setAttribute('opacity', '0');
+}
+
+document.addEventListener('DOMContentLoaded', updateRouteLabels);
 </script>
 <script src="/static/flight_delay_predict_polling.js"></script>
 {% endblock %}

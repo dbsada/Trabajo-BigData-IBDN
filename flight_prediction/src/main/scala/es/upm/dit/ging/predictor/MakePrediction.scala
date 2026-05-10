@@ -16,8 +16,8 @@ object MakePrediction {
       .getOrCreate()
     import spark.implicits._
 
-    //Load the arrival delay bucketizer
-    val base_path = "s3a://lakehouse" 
+    // Load models from S3
+    val base_path = "s3a://lakehouse"
     val arrivalBucketizerPath = "%s/models/arrival_bucketizer_2.0.bin".format(base_path)
     print(arrivalBucketizerPath.toString())
     val arrivalBucketizer = Bucketizer.load(arrivalBucketizerPath)
@@ -46,6 +46,17 @@ object MakePrediction {
       .option("subscribe", "flight-delay-ml-request")
       .load()
     df.printSchema()
+
+    // Status stream: signals when Spark starts processing a message
+    val statusStream = df
+      .selectExpr("'status' as key", "'PROCESSING' as value")
+      .writeStream
+      .format("kafka")
+      .option("kafka.bootstrap.servers", "kafka:9092")
+      .option("topic", "flight-delay-ml-status")
+      .option("checkpointLocation", "/tmp/spark_checkpoint_status")
+      .outputMode("append")
+      .start()
 
     val flightJsonDf = df.selectExpr("CAST(value AS STRING)")
 
