@@ -34,10 +34,7 @@ os.makedirs('logs', exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("logs/orchestrator.log"),
-        logging.StreamHandler(sys.stdout)
-    ]
+    filename="logs/orchestrator.log"
 )
 
 _status_line = ""
@@ -158,7 +155,8 @@ class ClusterManager:
       _status_line = ""
       logging.info('🚀 Iniciando servicios con Docker Compose...')
       os.environ['DB_MODE'] = db
-      self.m._run_command(f'docker compose --profile db_{db} up -d', cwd=self.m.project_home)
+      with console.status("[dim]Building Docker images (may take minutes)[/dim]", spinner="dots"):
+          self.m._run_command(f'docker compose --profile db_{db} up -d --build', cwd=self.m.project_home)
 
       db_label = "MongoDB" if db == 'mongo' else "Cassandra"
       db_port = int(os.getenv('MONGODB_PORT', '27017')) if db == 'mongo' else int(os.getenv('CASSANDRA_PORT', '9042'))
