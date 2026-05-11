@@ -183,4 +183,4 @@ project/project/
 
 # logs
 logs/*
-!logs/.gitkeep
+!logs/.gitkeepcloud/__pycache__/

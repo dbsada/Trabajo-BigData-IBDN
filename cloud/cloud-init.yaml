@@ -1,0 +1,11 @@
+#cloud-config
+packages:
+  - docker.io
+  - docker-compose-plugin
+  - git
+  - python3-pip
+runcmd:
+  - systemctl enable docker
+  - systemctl start docker
+  - usermod -aG docker ubuntu
+  - echo "VM ready for IBDN deployment"

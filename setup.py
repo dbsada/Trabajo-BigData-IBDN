@@ -32,11 +32,6 @@ logging.basicConfig(
 _status_line = ""
 console = Console()
 
-def _quiet_ask(question):
-    with open(os.devnull, 'w') as null:
-        with __import__('contextlib').redirect_stderr(null):
-            return question.ask()
-
 def set_status(text):
     global _status_line
     if _status_line:
@@ -437,8 +432,19 @@ def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
     _status_line = ""
     set_status("Containers stopped. Goodbye!")
 
-def main_kubernetes(db: Literal['mongo', 'cassandra']):
-  raise NotImplementedError('Función main_kubernetes no implementada aún.')
+def main_docker_gcloud(db):
+  """Deploy to GCloud VM via Docker Compose"""
+  from cloud.gcp_orchestrator import GCPOrchestrator
+  os.environ['DB_MODE'] = db
+  orch = GCPOrchestrator(mode="gcloud")
+  orch.run()
+
+def main_kubernetes_gke(db):
+  """Deploy to GKE cluster"""
+  from cloud.gcp_orchestrator import GCPOrchestrator
+  os.environ['DB_MODE'] = db
+  orch = GCPOrchestrator(mode="gke")
+  orch.run()
 
 if __name__ == '__main__':
   os.system('clear')
@@ -459,40 +465,50 @@ if __name__ == '__main__':
   console.print(title_panel)
   console.print()
 
-  infra = _quiet_ask(questionary.select(
+  infra = questionary.select(
       "¿Qué infraestructura deseas usar?",
       choices=[
           "Docker",
-          "Kubernetes"
+          "Docker (GCloud)",
+          "K8S (GKE)"
       ],
       default="Docker"
-  ))
+  ).ask()
 
-  db_choice = _quiet_ask(questionary.select(
+  db_choice = questionary.select(
       "¿Qué base de datos quieres levantar?",
       choices=[
           "MongoDB",
           "Cassandra"
       ],
       default="Cassandra"
-  ))
+  ).ask()
 
   # Clear 2 lines of questions from terminal
   sys.stdout.write("\033[1A\033[2K\033[1A\033[2K")
   sys.stdout.flush()
 
-  infra_mode = "docker" if "Docker" in infra else "kubernetes"
+  infra_mode = "docker" if "Docker" in infra and "GCloud" not in infra else "gcloud" if "GCloud" in infra else "gke"
   db = "mongo" if "MongoDB" in db_choice else "cassandra"
   db_label = "MongoDB" if db == 'mongo' else "Cassandra"
 
+  if infra_mode == "docker":
+    infra_label = "Docker"
+  elif infra_mode == "gcloud":
+    infra_label = "Docker (GCloud)"
+  else:
+    infra_label = "K8S (GKE)"
+
   console.print(Align.center(Text.assemble(
       ("⚙️ ", "bold yellow"),
-      ("Docker", "bold white"),
+      (infra_label, "bold white"),
       (" + ", "dim white"),
       (db_label, "bold cyan"),
   )))
 
   if infra_mode == "docker":
     main_docker(db=db)
-  elif infra_mode == "kubernetes":
-    main_kubernetes(db=db)
+  elif infra_mode == "gcloud":
+    main_docker_gcloud(db=db)
+  elif infra_mode == "gke":
+    main_kubernetes_gke(db=db)
