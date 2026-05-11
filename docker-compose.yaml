@@ -40,13 +40,15 @@ services:
       dockerfile: docker/dockerfile.spark
     container_name: spark
     ports:
-      - "${SPARK_MASTER_UI_PORT}:${SPARK_MASTER_UI_PORT}" # Web UI del Master
-      - "${SPARK_MASTER_PORT}:${SPARK_MASTER_PORT}" # Puerto de comunicación
+      - "${SPARK_MASTER_UI_PORT}:${SPARK_MASTER_UI_PORT}"
+      - "${SPARK_MASTER_PORT}:${SPARK_MASTER_PORT}"
     volumes:
       - .:/app
       - ./data/coursier:/root/.cache/coursier
       - ./data/ivy2:/root/.ivy2
     working_dir: /app
+    environment:
+      - MLFLOW_TRACKING_URI=${MLFLOW_TRACKING_URI}
 
   spark-worker:
     build:
@@ -75,6 +77,7 @@ services:
       - kafka
     volumes:
       - .:/app
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - FLASK_DEBUG=1
       - PROJECT_HOME=/app/
@@ -86,6 +89,23 @@ services:
       - KAFKA_TOPIC=${KAFKA_TOPIC}
       - KAFKA_RESPONSE_TOPIC=${KAFKA_RESPONSE_TOPIC}
       - KAFKA_STATUS_TOPIC=${KAFKA_STATUS_TOPIC}
+      - MLFLOW_TRACKING_URI=${MLFLOW_TRACKING_URI}
+
+  mlflow:
+    image: python:3.9-slim
+    container_name: mlflow
+    ports:
+      - "${MLFLOW_PORT}:5000"
+    volumes:
+      - ./data/mlflow:/data/mlflow
+    environment:
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+    command: >
+      sh -c "pip install -q mlflow boto3 && mlflow server --host 0.0.0.0 --backend-store-uri sqlite:///data/mlflow/mlflow.db --default-artifact-root s3a://lakehouse/mlflow/"
+    depends_on:
+      - minio
 
   minio:
     image: minio/minio

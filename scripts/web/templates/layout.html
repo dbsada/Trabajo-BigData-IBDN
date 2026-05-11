@@ -100,6 +100,31 @@ body {
 
       /* Architecture diagram */
       .arch-title { font-size: 0.8rem; color: #888; margin-bottom: 0.5rem; }
+      .tab-btn {
+        flex:1; padding:0.35rem 0.5rem; border:none; border-radius:4px;
+        font-size:0.75rem; font-weight:500; cursor:pointer; transition:all 0.2s;
+        background:#1e1e2a; color:#888; border:1px solid #2a2a3a; text-transform:uppercase; letter-spacing:0.3px;
+      }
+      .tab-btn:hover { border-color:#3a3a4e; color:#b0b0b8; }
+      .tab-btn.active { background:#2563eb20; border-color:#2563eb; color:#60a5fa; }
+      .tab-panel { display:none; }
+      .tab-panel.active { display:block; }
+      .tab-carousel { display:flex; overflow-x:auto; scroll-snap-type:x mandatory; scrollbar-width:none; -ms-overflow-style:none; }
+      .tab-carousel::-webkit-scrollbar { display:none; }
+      .tab-carousel .tab-panel { flex:0 0 100%; scroll-snap-align:start; display:block; overflow:hidden; }
+      @keyframes shimmer {
+        0% { background-position: 200% 0; }
+        100% { background-position: -200% 0; }
+      }
+      input[type=range] { -webkit-appearance:none; appearance:none; height:6px; background:#2a2a3a; border-radius:3px; outline:none; cursor:pointer; }
+      input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; appearance:none; width:14px; height:14px; border-radius:50%; background:#60a5fa; border:2px solid #1e1e2a; cursor:pointer; }
+      .pulse-gear { display:inline-block; animation:pulse 2s ease-in-out infinite; }
+      @keyframes pulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.3)} }
+      .tab-dots { display:flex; justify-content:center; align-items:center; gap:0.5rem; margin-top:0.75rem; }
+      .tab-dots .dot { width:7px; height:7px; border-radius:50%; background:#3a3a4e; cursor:pointer; transition:all 0.3s; }
+      .tab-dots .dot.active { background:#60a5fa; box-shadow:0 0 4px #60a5fa80; }
+      .progress-bar { height:6px; background:#2a2a3a; border-radius:3px; overflow:hidden; }
+      .progress-bar-fill { height:100%; background:#60a5fa; border-radius:3px; transition:width 1s; }
 
       /* SVG architecture nodes */
       .sv-node { transition: fill 0.4s, stroke 0.4s; }

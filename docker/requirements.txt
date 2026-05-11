@@ -8,3 +8,4 @@ requests
 iso8601
 joblib
 boto3
+docker

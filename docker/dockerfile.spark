@@ -46,7 +46,7 @@ RUN curl -L -o /opt/spark/jars/mongo-spark-connector_2.13-10.4.1.jar \
 # 6. Spark default config (Iceberg + S3A/MinIO)
 COPY docker/spark-defaults.conf /opt/spark/conf/spark-defaults.conf
 
-RUN pip3 install numpy pyspark findspark --break-system-packages
+RUN pip3 install numpy pyspark findspark mlflow --break-system-packages
 
 ENV PATH="/opt/spark/bin:$PATH"
 WORKDIR /app

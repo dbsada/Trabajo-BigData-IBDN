@@ -117,7 +117,9 @@ function getDropdown(input) {
 
 {% block arch %}
 <div class="arch" id="arch">
-<div class="arch-title">ARCHITECTURE</div>
+<div class="tab-carousel" id="tab-carousel">
+  <div id="tab-arch" class="tab-panel">
+    <div style="font-size:0.75rem;color:#888;margin-bottom:0.5rem;text-transform:uppercase;letter-spacing:0.5px;font-weight:500">Architecture</div>
 <svg viewBox="0 0 380 380" width="100%" style="overflow:visible">
   <defs>
     <marker id="arrow" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="6" markerHeight="6" orient="auto">
@@ -149,11 +151,11 @@ function getDropdown(input) {
   <rect id="sv-flask" x="60" y="280" width="180" height="40" rx="6" fill="#1e1e2a" stroke="#1971c2" stroke-width="2" class="sv-node"/>
   <text x="150" y="300" fill="#d0d0d8" font-size="12" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">FLASK</text>
 
-  <rect x="130" y="328" width="120" height="18" rx="4" fill="#1e1e2a" stroke="#2a2a3a" stroke-width="1"/>
-  <rect x="140" y="333" width="7" height="7" rx="2" fill="#60a5fa"/>
-  <text x="153" y="341" fill="#888" font-size="9" font-family="inherit">active</text>
-  <rect x="193" y="333" width="7" height="7" rx="2" fill="#22c55e"/>
-  <text x="206" y="341" fill="#888" font-size="9" font-family="inherit">done</text>
+  <rect x="130" y="344" width="120" height="18" rx="4" fill="#1e1e2a" stroke="#2a2a3a" stroke-width="1"/>
+  <rect x="140" y="350" width="7" height="7" rx="2" fill="#60a5fa"/>
+  <text x="153" y="356" fill="#888" font-size="9" font-family="inherit">active</text>
+  <rect x="193" y="350" width="7" height="7" rx="2" fill="#22c55e"/>
+  <text x="206" y="356" fill="#888" font-size="9" font-family="inherit">done</text>
 
   <g id="sv-a0" class="sv-arrow">
     <path d="M 110 280 L 110 204" fill="none" stroke-width="5"/>
@@ -176,6 +178,48 @@ function getDropdown(input) {
     <polygon points="200,281 194,271 206,271"/>
   </g>
 </svg>
+</div>
+
+<div id="tab-models" class="tab-panel">
+  <div style="font-size:0.75rem;color:#888;margin-bottom:0.5rem;text-transform:uppercase;letter-spacing:0.5px;font-weight:500">Models</div>
+  <div id="models-loading" style="text-align:center;padding:2rem;color:#555;font-size:0.85rem">Loading models...</div>
+  <div id="models-content" style="display:none"></div>
+
+  <!-- Train modal -->
+  <div id="train-modal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:#00000080;z-index:1000;justify-content:center;align-items:center">
+    <div style="background:#1e1e2a;border:1px solid #2a2a3a;border-radius:10px;padding:1.2rem;width:360px;max-height:90vh;overflow-y:auto">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+        <span style="color:#d0d0d8;font-size:0.9rem;font-weight:600">Train New Model</span>
+        <span id="modal-close" style="color:#888;cursor:pointer;font-size:1.1rem">&times;</span>
+      </div>
+
+      <label style="display:block;font-size:0.7rem;color:#888;margin-bottom:0.2rem">Trees <span id="trees-val" style="color:#60a5fa;font-weight:600">20</span></label>
+      <input type="range" id="slider-trees" min="1" max="100" value="20" style="width:100%;margin-bottom:0.5rem">
+
+      <label style="display:block;font-size:0.7rem;color:#888;margin-bottom:0.2rem">Max Depth <span id="depth-val" style="color:#60a5fa;font-weight:600">10</span></label>
+      <input type="range" id="slider-depth" min="1" max="30" value="10" style="width:100%;margin-bottom:0.5rem">
+
+      <label style="display:block;font-size:0.7rem;color:#888;margin-bottom:0.2rem">Max Bins <span id="bins-val" style="color:#60a5fa;font-weight:600">4657</span></label>
+      <input type="range" id="slider-bins" min="100" max="10000" step="100" value="4657" style="width:100%;margin-bottom:0.5rem">
+
+      <label style="display:block;font-size:0.7rem;color:#888;margin-bottom:0.2rem">Max Memory (MB) <span id="mem-val" style="color:#60a5fa;font-weight:600">1024</span></label>
+      <input type="range" id="slider-mem" min="128" max="4096" step="64" value="1024" style="width:100%;margin-bottom:0.75rem">
+
+      <button id="start-train-btn" style="width:100%;background:#2563eb;color:#fff;border:none;padding:0.5rem;border-radius:6px;font-size:0.85rem;font-weight:600;cursor:pointer">Start Training</button>
+    </div>
+  </div>
+</div>
+<div id="tab-services" class="tab-panel">
+  <div style="font-size:0.75rem;color:#888;margin-bottom:0.5rem;text-transform:uppercase;letter-spacing:0.5px;font-weight:500">Services</div>
+  <div id="services-content" style="padding:0.5rem 0"></div>
+</div>
+</div>
+
+<div class="tab-dots">
+  <span class="dot active" data-index="0"></span>
+  <span class="dot" data-index="1"></span>
+  <span class="dot" data-index="2"></span>
+</div>
 </div>
 
 <script src="https://cdn.socket.io/4.5.0/socket.io.min.js"></script>
@@ -241,7 +285,9 @@ $("#flight_delay_classification").submit(function(event) {
   posting.done(function(data) {
     var response = JSON.parse(data);
     if (response.status == "OK") {
-      advanceArch();
+      advanceArch();  // Flask
+      socket.emit('subscribe', { id: response.id });
+      setTimeout(function() { advanceArch(); }, 250);  // → Kafka-L
       $("#result").empty().append("Processing...");
     }
   });
@@ -296,6 +342,269 @@ function stopRouteAnimation() {
 }
 
 document.addEventListener('DOMContentLoaded', updateRouteLabels);
+
+// Carousel dots
+var carousel = document.getElementById('tab-carousel');
+var dots = document.querySelectorAll('.tab-dots .dot');
+
+dots.forEach(function(dot) {
+  dot.addEventListener('click', function() {
+    var idx = parseInt(this.dataset.index);
+    carousel.scrollTo({ left: idx * carousel.clientWidth, behavior: 'smooth' });
+  });
+});
+
+carousel.addEventListener('scroll', function() {
+  var idx = Math.round(this.scrollLeft / this.clientWidth);
+  dots.forEach(function(d, i) { d.classList.toggle('active', i === idx); });
+  if (idx === 1) loadModels();
+  if (idx === 2) loadServices();
+});
+
+// Models panel
+var modelsLoaded = false;
+function loadModels() {
+  if (modelsLoaded) return;
+  modelsLoaded = true;
+  fetch('/api/models').then(function(r) { return r.json(); }).then(function(data) {
+    document.getElementById('models-loading').style.display = 'none';
+    var c = document.getElementById('models-content');
+    c.style.display = 'block';
+
+    var html = '<div style="margin-bottom:0.5rem;font-size:0.75rem;color:#888">Active model: <span style="color:#60a5fa;font-weight:600">' + data.active_run_id.slice(0,12) + '</span></div>';
+
+    // Builtin model row (always shown above table)
+    var builtin = null;
+    var mlflowModels = [];
+    data.models.forEach(function(m) {
+      if (m.builtin) builtin = m;
+      else mlflowModels.push(m);
+    });
+
+    if (builtin) {
+      var isBuiltinActive = data.active_run_id === 'builtin';
+      html += '<div style="display:flex;align-items:center;gap:0.5rem;padding:0.4rem 0.5rem;margin-bottom:0.5rem;background:#1e1e2a;border:1px solid #2a2a3a;border-radius:6px">';
+      html += '<div style="flex:1;font-size:0.8rem;color:#d0d0d8">&#9733; ' + builtin.run_name + ' <span style="color:#888;font-size:0.7rem">(acc: 58.8%)</span></div>';
+      if (isBuiltinActive) {
+        html += '<span style="background:#22c55e20;color:#22c55e;padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem">Active</span>';
+      } else {
+        html += '<a href="#" class="activate-btn" data-run="builtin" style="background:#2563eb;color:#fff;padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;text-decoration:none">Activate</a>';
+      }
+      html += '</div>';
+    }
+
+    html += '<table style="width:100%;border-collapse:collapse;font-size:0.8rem">';
+    html += '<thead><tr style="border-bottom:1px solid #2a2a3a">';
+    html += '<th style="padding:0.4rem 0.5rem;text-align:left;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Run</th>';
+    html += '<th style="padding:0.4rem 0.5rem;text-align:left;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Accuracy</th>';
+    html += '<th style="padding:0.4rem 0.5rem;text-align:left;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Bins</th>';
+    html += '<th style="padding:0.4rem 0.5rem;text-align:left;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Depth</th>';
+    html += '<th style="padding:0.4rem 0.5rem;text-align:left;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Date</th>';
+    html += '<th style="padding:0.4rem 0.5rem;text-align:right;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase"></th>';
+    html += '</tr></thead><tbody>';
+
+    if (mlflowModels.length === 0) {
+      html += '<tr><td colspan="6" style="padding:1rem;text-align:center;color:#555;font-size:0.8rem">No trained models yet</td></tr>';
+    } else {
+      mlflowModels.forEach(function(m) {
+        var acc = m.metrics && m.metrics.accuracy !== undefined ? (m.metrics.accuracy * 100).toFixed(1) + '%' : '—';
+        var date = new Date(m.start_time).toLocaleDateString();
+        var isActive = m.run_id === data.active_run_id;
+        html += '<tr style="border-bottom:1px solid #1e1e28">';
+        html += '<td style="padding:0.4rem 0.5rem;color:#d0d0d8">' + (m.run_name || m.run_id.slice(0, 8)) + '</td>';
+        html += '<td style="padding:0.4rem 0.5rem;color:#60a5fa;font-weight:600">' + acc + '</td>';
+        html += '<td style="padding:0.4rem 0.5rem;color:#888">' + (m.params.maxBins || '—') + '</td>';
+        html += '<td style="padding:0.4rem 0.5rem;color:#888">' + (m.params.maxDepth || '—') + '</td>';
+        html += '<td style="padding:0.4rem 0.5rem;color:#888">' + date + '</td>';
+        html += '<td style="padding:0.4rem 0.5rem;text-align:right">';
+        if (isActive) {
+          html += '<span style="background:#22c55e20;color:#22c55e;padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem">Active</span>';
+        } else {
+          html += '<a href="#" class="activate-btn" data-run="' + m.run_id + '" style="background:#2563eb;color:#fff;padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;text-decoration:none">Activate</a>';
+        }
+        html += ' <a href="#" class="delete-btn" data-run="' + m.run_id + '" style="color:#e05a5a;font-size:0.7rem;text-decoration:none;margin-left:0.3rem">&#10005;</a>';
+        html += '</td></tr>';
+      });
+    }
+    html += '</tbody></table>';
+    html += '<div style="margin-top:0.75rem">';
+    html += '<button id="train-btn" style="background:#2563eb;color:#fff;border:none;padding:0.4rem 1rem;border-radius:4px;font-size:0.75rem;cursor:pointer;font-weight:500">Train New Model</button>';
+    html += '</div>';
+    c.innerHTML = html;
+
+    // Check training status
+    fetch('/api/models/train/status').then(function(r) { return r.json(); }).then(function(s) {
+      if (s.status === 'running') showTrainingRow(s.elapsed);
+    });
+
+    // Attach activate handlers
+    c.querySelectorAll('.activate-btn').forEach(function(a) {
+      a.addEventListener('click', function(e) {
+        e.preventDefault();
+        var runId = this.dataset.run;
+        this.textContent = '...';
+        fetch('/api/models/activate/' + runId, { method: 'POST' }).then(function(r) { return r.json(); }).then(function() {
+          modelsLoaded = false;
+          loadModels();
+        });
+      });
+    });
+
+    // Delete handlers
+    c.querySelectorAll('.delete-btn').forEach(function(a) {
+      a.addEventListener('click', function(e) {
+        e.preventDefault();
+        if (!confirm('Delete this model run?')) return;
+        var runId = this.dataset.run;
+        this.textContent = '...';
+        fetch('/api/models/delete/' + runId, { method: 'POST' }).then(function(r) { return r.json(); }).then(function(data) {
+          if (data.error) { alert('Error: ' + data.error); return; }
+          modelsLoaded = false;
+          loadModels();
+        });
+      });
+    });
+
+    // Train button — opens modal
+    var trainBtn = document.getElementById('train-btn');
+    if (trainBtn) {
+      trainBtn.addEventListener('click', function() {
+        document.getElementById('train-modal').style.display = 'flex';
+        drawForest();
+      });
+    }
+  });
+}
+
+// Modal controls
+var modal = document.getElementById('train-modal');
+
+document.getElementById('modal-close').addEventListener('click', function() {
+  modal.style.display = 'none';
+});
+modal.addEventListener('click', function(e) {
+  if (e.target === modal) modal.style.display = 'none';
+});
+
+document.getElementById('slider-trees').addEventListener('input', function() {
+  document.getElementById('trees-val').textContent = this.value;
+});
+document.getElementById('slider-depth').addEventListener('input', function() {
+  document.getElementById('depth-val').textContent = this.value;
+});
+document.getElementById('slider-bins').addEventListener('input', function() {
+  document.getElementById('bins-val').textContent = this.value;
+});
+document.getElementById('slider-mem').addEventListener('input', function() {
+  document.getElementById('mem-val').textContent = this.value;
+});
+
+document.getElementById('start-train-btn').addEventListener('click', function() {
+  var btn = this;
+  btn.disabled = true;
+  btn.textContent = 'Starting...';
+  var hp = {
+    max_bins: parseInt(document.getElementById('slider-bins').value) || 4657,
+    max_memory_mb: parseInt(document.getElementById('slider-mem').value) || 1024,
+    num_trees: parseInt(document.getElementById('slider-trees').value) || 20,
+    max_depth: parseInt(document.getElementById('slider-depth').value) || 10
+  };
+  fetch('/api/models/train', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(hp) }).then(function(r) { return r.json(); }).then(function(data) {
+    modal.style.display = 'none';
+    btn.disabled = false;
+    btn.textContent = 'Start Training';
+    if (data.error) { return; }
+    modelsLoaded = false;
+    loadModels();
+  });
+});
+
+var trainingTimer = null;
+function showTrainingRow(elapsed) {
+  if (trainingTimer) clearInterval(trainingTimer);
+  trainingTimer = null;
+  var c = document.getElementById('models-content');
+  var tbody = c.querySelector('tbody');
+  if (!tbody) return;
+  var existing = c.querySelector('.training-row');
+  var html = '<tr class="training-row"><td colspan="6" style="padding:0.5rem;border-top:1px solid #2a2a3a">';
+  html += '<div style="display:flex;align-items:center;gap:0.75rem">';
+  html += '<span style="color:#60a5fa;font-size:0.75rem;white-space:nowrap"><span class="pulse-gear">&#9881;</span> Training</span>';
+  html += '<span style="color:#888;font-size:0.7rem;white-space:nowrap;font-family:monospace">' + elapsed + 's</span>';
+  html += '<a href="#" class="cancel-train-btn" style="color:#e05a5a;font-size:0.7rem;text-decoration:none;white-space:nowrap">Cancel</a>';
+  html += '</div></td></tr>';
+
+  if (existing) existing.outerHTML = html;
+  else tbody.insertAdjacentHTML('beforeend', html);
+
+  var cancelBtn = document.querySelector('.cancel-train-btn');
+  if (cancelBtn) {
+    cancelBtn.addEventListener('click', function(e) {
+      e.preventDefault();
+      if (!confirm('Cancel training?')) return;
+      fetch('/api/models/train/cancel', { method: 'POST' });
+      if (trainingTimer) clearInterval(trainingTimer);
+      trainingTimer = null;
+      var row = document.querySelector('.training-row');
+      if (row) row.remove();
+      modelsLoaded = false;
+      loadModels();
+    });
+  }
+
+  // Local tick: increment elapsed every second
+  var tick = elapsed;
+  var tickTimer = setInterval(function() {
+    tick++;
+    var ts = document.querySelector('.training-row td span:nth-child(2)');
+    if (ts) ts.textContent = tick + 's';
+  }, 1000);
+
+  trainingTimer = setTimeout(function poll() {
+    clearInterval(tickTimer);
+    fetch('/api/models/train/status').then(function(r) { return r.json(); }).then(function(s) {
+      if (s.status === 'running') { showTrainingRow(s.elapsed); }
+      else {
+        var row = document.querySelector('.training-row');
+        if (row) row.remove();
+        modelsLoaded = false;
+        loadModels();
+      }
+    });
+  }, 2000);
+}
+
+var servicesLoaded = false;
+function loadServices() {
+  if (servicesLoaded) return;
+  servicesLoaded = true;
+  var c = document.getElementById('services-content');
+  c.innerHTML = '<div style="text-align:center;padding:1rem;color:#555;font-size:0.85rem">Loading...</div>';
+  fetch('/api/services/status').then(function(r) { return r.json(); }).then(function(d) {
+    var html = '';
+      var ordered = ['kafka', 'spark', 'spark-worker', 'minio', 'mlflow', 'flask', 'cassandra', 'mongodb'];
+    if (d.services && Object.keys(d.services).length > 0) {
+      ordered.forEach(function(name) {
+        var svc = d.services[name];
+        if (!svc) return;
+        var statusColors = {'running': '#22c55e', 'active': '#22c55e', 'stopped': '#e05a5a', 'inactive': '#e05a5a', 'missing': '#e05a5a'};
+        var isUp = svc.status === 'running' || svc.status === 'active';
+        var dotColor = statusColors[svc.status] || '#e05a5a';
+        html += '<div style="display:flex;align-items:center;gap:0.5rem;padding:0.35rem 0;border-bottom:1px solid #1e1e28">';
+        html += '<span style="width:8px;height:8px;border-radius:50%;background:' + (isUp ? '#22c55e' : '#e05a5a') + ';flex-shrink:0"></span>';
+        html += '<span style="flex:1;color:#d0d0d8;font-size:0.8rem">' + name + '</span>';
+        html += '<span style="color:#888;font-size:0.7rem">' + svc.image + '</span>';
+        html += '<span style="color:' + (isUp ? '#22c55e' : '#e05a5a') + ';font-size:0.7rem;font-weight:500">' + svc.status + '</span>';
+        html += '</div>';
+      });
+      c.innerHTML = html;
+    } else {
+      c.innerHTML = '<div style="text-align:center;padding:1rem;color:#555;font-size:0.85rem">No services found</div>';
+    }
+  }).catch(function() {
+    c.innerHTML = '<div style="text-align:center;padding:1rem;color:#e05a5a;font-size:0.85rem">Failed to load services</div>';
+  });
+}
 </script>
 <script src="/static/flight_delay_predict_polling.js"></script>
 {% endblock %}

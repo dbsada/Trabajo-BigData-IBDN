@@ -1,0 +1,65 @@
+{% extends "layout.html" %}
+{% block body %}
+<div style="margin-bottom:1rem;display:flex;justify-content:space-between;align-items:center">
+  <div>
+    <div style="font-size:0.75rem;color:#888;text-transform:uppercase;letter-spacing:0.5px;font-weight:500">Model Registry</div>
+    <div style="font-size:0.85rem;color:#b0b0b8;margin-top:0.2rem">Active model: <span style="color:#60a5fa;font-weight:600">{{ active_run_id }}</span></div>
+  </div>
+  <a href="/" style="font-size:0.8rem;color:#60a5fa;text-decoration:none">&larr; Back to Predict</a>
+</div>
+<div style="background:#1e1e2a;border:1px solid #2a2a3a;border-radius:8px;overflow:hidden">
+  <table style="width:100%;border-collapse:collapse;font-size:0.85rem">
+    <thead>
+      <tr style="border-bottom:1px solid #2a2a3a">
+        <th style="padding:0.75rem 1rem;text-align:left;color:#888;font-weight:500;text-transform:uppercase;letter-spacing:0.3px;font-size:0.7rem">Run</th>
+        <th style="padding:0.75rem 1rem;text-align:left;color:#888;font-weight:500;text-transform:uppercase;letter-spacing:0.3px;font-size:0.7rem">Accuracy</th>
+        <th style="padding:0.75rem 1rem;text-align:left;color:#888;font-weight:500;text-transform:uppercase;letter-spacing:0.3px;font-size:0.7rem">MaxBins</th>
+        <th style="padding:0.75rem 1rem;text-align:left;color:#888;font-weight:500;text-transform:uppercase;letter-spacing:0.3px;font-size:0.7rem">MaxMemory</th>
+        <th style="padding:0.75rem 1rem;text-align:left;color:#888;font-weight:500;text-transform:uppercase;letter-spacing:0.3px;font-size:0.7rem">Status</th>
+        <th style="padding:0.75rem 1rem;text-align:left;color:#888;font-weight:500;text-transform:uppercase;letter-spacing:0.3px;font-size:0.7rem">Date</th>
+        <th style="padding:0.75rem 1rem;text-align:right;color:#888;font-weight:500;text-transform:uppercase;letter-spacing:0.3px;font-size:0.7rem">Action</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for m in models %}
+      <tr style="border-bottom:1px solid #1e1e28">
+        <td style="padding:0.75rem 1rem;color:#d0d0d8">{{ m.run_name or m.run_id[:8] }}</td>
+        <td style="padding:0.75rem 1rem;color:#d0d0d8">
+          {% if m.metrics.accuracy is defined %}
+          <span style="color:#60a5fa;font-weight:600">{{ "%.1f"|format(m.metrics.accuracy * 100) }}%</span>
+          {% else %}
+          <span style="color:#555">—</span>
+          {% endif %}
+        </td>
+        <td style="padding:0.75rem 1rem;color:#888">{{ m.params.get("maxBins", "—") }}</td>
+        <td style="padding:0.75rem 1rem;color:#888">{{ m.params.get("maxMemoryInMB", "—") }} MB</td>
+        <td style="padding:0.75rem 1rem">
+          {% if m.status == "FINISHED" %}
+          <span style="color:#22c55e">&#10003; Finished</span>
+          {% elif m.status == "RUNNING" %}
+          <span style="color:#60a5fa">&#9679; Running</span>
+          {% else %}
+          <span style="color:#888">{{ m.status }}</span>
+          {% endif %}
+        </td>
+        <td style="padding:0.75rem 1rem;color:#888">{{ m.start_time | int | timestamp_to_date }}</td>
+        <td style="padding:0.75rem 1rem;text-align:right">
+          {% if m.run_id == active_run_id %}
+          <span style="background:#22c55e20;color:#22c55e;padding:0.2rem 0.6rem;border-radius:4px;font-size:0.75rem;font-weight:500">Active</span>
+          {% else %}
+          <a href="/models/activate/{{ m.run_id }}" style="background:#2563eb;color:#fff;padding:0.2rem 0.6rem;border-radius:4px;font-size:0.75rem;text-decoration:none;font-weight:500">Activate</a>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if not models %}
+  <div style="padding:2rem;text-align:center;color:#555;font-size:0.85rem">
+    No models found. Train one first with <code style="background:#16161e;padding:0.1rem 0.3rem;border-radius:3px">docker exec spark spark-submit scripts/train.py</code>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block arch %}{% endblock %}

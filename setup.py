@@ -369,9 +369,10 @@ def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
     set_status("Spark streaming running \u2713")
 
     flk_port = os.getenv('FLASK_PORT', '5001')
-    manager._wait_for_http(f"http://{vm_ip}:{flk_port}/flights/delays/predict_kafka", timeout=30)
+    manager._wait_for_http(f"http://{vm_ip}:{flk_port}/", timeout=30)
 
-    set_status(f"API ready: http://{vm_ip}:{flk_port}/flights/delays/predict_kafka")
+    set_status(f"API ready: http://{vm_ip}:{flk_port}/")
+    
     set_status("")
 
     rich.print("\n[bold]Cluster ready[/bold]  ·  [dim]Press Ctrl+C to shutdown[/dim]")

@@ -1,5 +1,5 @@
 import sys, os, re
-from flask import Flask, render_template, request
+from flask import Flask, render_template, request, redirect, url_for
 from pymongo import MongoClient
 from bson import json_util
 import socket
@@ -45,6 +45,11 @@ def inject_arch_info():
         KAFKA_RESPONSE_TOPIC=os.getenv('KAFKA_RESPONSE_TOPIC', 'flight-delay-ml-response'),
     )
 
+@app.template_filter()
+def timestamp_to_date(ts):
+    import datetime
+    return datetime.datetime.fromtimestamp(ts / 1000).strftime('%Y-%m-%d %H:%M')
+
 _airport_cache = None
 
 @app.route("/api/airports")
@@ -62,6 +67,336 @@ def api_airports():
     q = request.args.get('q', '').upper()
     match = [a for a in _airport_cache if a.startswith(q)] if q else _airport_cache
     return json_util.dumps(match[:50])
+
+@app.route("/api/models")
+def api_models():
+    import requests
+    import boto3
+    from botocore.config import Config
+
+    # Fetch runs from MLflow
+    try:
+        resp = requests.post(f"{MLFLOW_TRACKING_URI}/api/2.0/mlflow/runs/search",
+            json={"experiment_ids": ["0"], "order_by": ["start_time desc"]}, timeout=5)
+        runs_data = resp.json().get("runs", [])
+        runs_data = [r for r in runs_data if r.get("info", {}).get("lifecycle_stage", "active") != "deleted"
+            and r.get("info", {}).get("run_name") != "Original"]
+    except Exception:
+        runs_data = []
+
+    model_list = []
+    model_list.append({
+        "run_id": "builtin",
+        "run_name": "Original",
+        "status": "READY",
+        "start_time": 0,
+        "params": {"maxBins": "4657", "maxMemoryInMB": "1024", "numTrees": "20", "maxDepth": "10"},
+        "metrics": {"accuracy": 0.588},
+        "builtin": True,
+    })
+    for run in runs_data:
+        info = run["info"]
+        data = run["data"]
+        params = {p["key"]: p["value"] for p in data.get("params", [])}
+        metrics = {m["key"]: m["value"] for m in data.get("metrics", [])}
+        model_list.append({
+            "run_id": info["run_id"],
+            "run_name": info.get("run_name", info["run_id"][:8]),
+            "status": info["status"],
+            "start_time": info["start_time"],
+            "params": params,
+            "metrics": metrics,
+        })
+
+    # Read active marker
+    active_run_id = None
+    try:
+        s3 = boto3.client("s3",
+            endpoint_url=MINIO_ENDPOINT,
+            aws_access_key_id=os.getenv("MINIO_ROOT_USER", "admin"),
+            aws_secret_access_key=os.getenv("MINIO_ROOT_PASSWORD", "password"),
+            config=Config(signature_version="s3v4"))
+        marker = s3.get_object(Bucket="lakehouse", Key="models/active_run_id.txt")
+        active_run_id = marker["Body"].read().decode().strip()
+    except Exception:
+        active_run_id = "builtin"
+
+    return json_util.dumps({"models": model_list, "active_run_id": active_run_id})
+
+@app.route("/api/models/activate/<run_id>", methods=["POST"])
+def api_activate_model(run_id):
+    import boto3, os
+    from botocore.config import Config
+
+    try:
+        s3 = boto3.client("s3",
+            endpoint_url=MINIO_ENDPOINT,
+            aws_access_key_id=os.getenv("MINIO_ROOT_USER", "admin"),
+            aws_secret_access_key=os.getenv("MINIO_ROOT_PASSWORD", "password"),
+            config=Config(signature_version="s3v4"))
+
+        dst_prefix = "models/spark_random_forest_classifier.flight_delays.5.0.bin/"
+
+        if run_id == "builtin":
+            import requests as req
+            # Find the MLflow run named "Original"
+            resp = req.post(f"{MLFLOW_TRACKING_URI}/api/2.0/mlflow/runs/search",
+                json={"experiment_ids": ["0"], "order_by": ["start_time desc"],
+                      "filter": "tags.mlflow.runName = 'Original'"}, timeout=5)
+            runs = resp.json().get("runs", [])
+            if not runs:
+                return json_util.dumps({"error": "Original model not found in MLflow. Run: docker exec spark spark-submit scripts/register_original.py"}), 404
+            original_run_id = runs[0]["info"]["run_id"]
+            src_prefix = f"mlflow/0/{original_run_id}/artifacts/model/"
+            stages = s3.list_objects_v2(Bucket="lakehouse", Prefix=f"{src_prefix}sparkml/stages/", Delimiter="/")
+            stage_prefix = None
+            for p in stages.get("CommonPrefixes", []):
+                stage_prefix = p["Prefix"]
+                break
+            if not stage_prefix:
+                return json_util.dumps({"error": "Original model files not found in MLflow"}), 404
+            existing = s3.list_objects_v2(Bucket="lakehouse", Prefix=dst_prefix)
+            for obj in existing.get("Contents", []):
+                s3.delete_object(Bucket="lakehouse", Key=obj["Key"])
+            objects = s3.list_objects_v2(Bucket="lakehouse", Prefix=stage_prefix)
+            for obj in objects.get("Contents", []):
+                rel_path = obj["Key"][len(stage_prefix):]
+                s3.copy_object(Bucket="lakehouse",
+                    CopySource={"Bucket": "lakehouse", "Key": obj["Key"]},
+                    Key=f"{dst_prefix}{rel_path}")
+        else:
+            src_prefix = f"mlflow/0/{run_id}/artifacts/model/"
+            stages = s3.list_objects_v2(Bucket="lakehouse", Prefix=f"{src_prefix}sparkml/stages/", Delimiter="/")
+            stage_prefix = None
+            for p in stages.get("CommonPrefixes", []):
+                stage_prefix = p["Prefix"]
+                break
+            if not stage_prefix:
+                return json_util.dumps({"error": "No model stages found"}), 400
+
+            existing = s3.list_objects_v2(Bucket="lakehouse", Prefix=dst_prefix)
+            for obj in existing.get("Contents", []):
+                s3.delete_object(Bucket="lakehouse", Key=obj["Key"])
+
+            objects = s3.list_objects_v2(Bucket="lakehouse", Prefix=stage_prefix)
+            for obj in objects.get("Contents", []):
+                rel_path = obj["Key"][len(stage_prefix):]
+                s3.copy_object(Bucket="lakehouse",
+                    CopySource={"Bucket": "lakehouse", "Key": obj["Key"]},
+                    Key=f"{dst_prefix}{rel_path}")
+
+        s3.put_object(Bucket="lakehouse", Key="models/active_run_id.txt", Body=run_id.encode())
+        return json_util.dumps({"ok": True, "active_run_id": run_id})
+    except Exception as e:
+        return json_util.dumps({"error": str(e)}), 500
+
+def _restart_prediction_job():
+    import docker, requests as req, threading
+    try:
+        # Kill existing prediction apps
+        r = req.get("http://spark:8080/json/", timeout=3)
+        data = r.json()
+        for app in data.get("activeapps", []):
+            if "FlightDelayPrediction" in app.get("name", ""):
+                req.post("http://spark:8080/app/kill/", data={"id": app.get("id",""), "terminate": "true"}, timeout=3)
+
+        # Wait a moment then resubmit
+        def _submit():
+            import time
+            time.sleep(5)
+            client = docker.from_env()
+            access_key = os.getenv("MINIO_ROOT_USER", "admin")
+            secret_key = os.getenv("MINIO_ROOT_PASSWORD", "password")
+            prediction_jar = os.getenv("PREDICTION_JAR",
+                "/app/flight_prediction/target/scala-2.13/flight_prediction_2.13-0.1.jar")
+            cmd = (
+                f"spark-submit --master spark://spark:7077 "
+                f"--deploy-mode cluster --conf spark.cores.max=2 "
+                f"--conf spark.hadoop.fs.s3a.access.key={access_key} "
+                f"--conf spark.hadoop.fs.s3a.secret.key={secret_key} "
+                f"--conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem "
+                f"--conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 "
+                f"--conf spark.hadoop.fs.s3a.path.style.access=true "
+                f"--conf spark.hadoop.fs.s3a.connection.ssl.enabled=false "
+                f"--class es.upm.dit.ging.predictor.MakePrediction "
+                f"{prediction_jar}"
+            )
+            container = client.containers.get("spark")
+            container.exec_run(cmd, environment={"MLFLOW_TRACKING_URI": os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")}, detach=True)
+
+        threading.Thread(target=_submit, daemon=True).start()
+    except Exception as e:
+        print(f"Restart prediction error: {e}")
+
+@app.route("/api/prediction/restart", methods=["POST"])
+def api_restart_prediction():
+    _restart_prediction_job()
+    return json_util.dumps({"ok": True})
+
+@app.route("/api/models/train", methods=["POST"])
+def api_train_model():
+    import threading, docker
+    if getattr(api_train_model, "_training", False):
+        return json_util.dumps({"status": "already_running"}), 200
+
+    # Read hyperparameters from request
+    data = request.get_json(silent=True) or {}
+    max_bins = data.get("max_bins", 4657)
+    max_memory_mb = data.get("max_memory_mb", 1024)
+    num_trees = data.get("num_trees", 20)
+    max_depth = data.get("max_depth", 10)
+
+    try:
+        client = docker.from_env()
+
+        api_train_model._training = True
+
+        # Kill any stale training apps or resource-hogging apps on Spark
+        try:
+            import requests as req
+            r = req.get("http://spark:8080/json/", timeout=3)
+            data = r.json()
+            for app in data.get("activeapps", []):
+                if "train_spark_mllib_model" in app.get("name", ""):
+                    app_id = app.get("id", "")
+                    req.post("http://spark:8080/app/kill/", data={"id": app_id, "terminate": "true"}, timeout=3)
+        except Exception:
+            pass
+
+        last_run_id = None
+        try:
+            import requests as req
+            resp = req.post(f"{MLFLOW_TRACKING_URI}/api/2.0/mlflow/runs/search",
+                json={"experiment_ids": ["0"], "order_by": ["start_time desc"], "max_results": 1, "run_view_type": "ACTIVE_ONLY"}, timeout=5)
+            runs = resp.json().get("runs", [])
+            if runs:
+                last_run_id = runs[0]["info"]["run_id"]
+        except Exception:
+            pass
+
+        def _train():
+            try:
+                container = client.containers.get("spark")
+                container.exec_run(
+                    "spark-submit --master spark://spark:7077 "
+                    "--conf spark.cores.max=1 "
+                    "--conf spark.hadoop.fs.s3a.access.key=" + os.getenv("MINIO_ROOT_USER", "admin") + " "
+                    "--conf spark.hadoop.fs.s3a.secret.key=" + os.getenv("MINIO_ROOT_PASSWORD", "password") + " "
+                    "scripts/train.py "
+                    "--max-bins " + str(max_bins) + " "
+                    "--max-memory-mb " + str(max_memory_mb) + " "
+                    "--num-trees " + str(num_trees) + " "
+                    "--max-depth " + str(max_depth) + " ",
+                    environment={
+                        "MLFLOW_TRACKING_URI": os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000"),
+                    },
+                    detach=False,
+                )
+            except Exception as e:
+                print(f"Training error: {e}")
+            finally:
+                api_train_model._training = False
+                import threading
+                threading.Thread(target=_restart_prediction_job, daemon=True).start()
+
+        t = threading.Thread(target=_train, daemon=True)
+        t.start()
+        return json_util.dumps({"status": "started", "last_run_id": last_run_id})
+    except Exception as e:
+        return json_util.dumps({"error": str(e)}), 500
+
+@app.route("/api/models/train/status")
+def api_train_status():
+    import requests as req
+    try:
+        r = req.get("http://spark:8080/json/", timeout=3)
+        data = r.json()
+        for app in data.get("activeapps", []):
+            if "train_spark_mllib_model" in app.get("name", ""):
+                return json_util.dumps({"status": "running", "elapsed": app["duration"] // 1000})
+    except Exception:
+        pass
+    if getattr(api_train_model, "_training", False):
+        return json_util.dumps({"status": "running", "elapsed": 0})
+    return json_util.dumps({"status": "idle"})
+
+@app.route("/api/models/train/cancel", methods=["POST"])
+def api_cancel_training():
+    import requests as req
+    try:
+        r = req.get("http://spark:8080/json/", timeout=3)
+        data = r.json()
+        killed = []
+        for app in data.get("activeapps", []):
+            if "train_spark_mllib_model" in app.get("name", ""):
+                app_id = app.get("id", "")
+                req.post("http://spark:8080/app/kill/", data={"id": app_id, "terminate": "true"}, timeout=3)
+                killed.append(app_id)
+        api_train_model._training = False
+        return json_util.dumps({"ok": True, "killed": killed})
+    except Exception as e:
+        return json_util.dumps({"error": str(e)}), 500
+
+@app.route("/api/models/delete/<run_id>", methods=["POST"])
+def api_delete_model(run_id):
+    import boto3
+    from botocore.config import Config
+    try:
+        # 1. Delete from MLflow
+        import requests as req
+        mlflow_resp = req.post(f"{MLFLOW_TRACKING_URI}/api/2.0/mlflow/runs/delete",
+            json={"run_id": run_id}, timeout=5)
+
+        # 2. Delete artifacts from MinIO
+        s3 = boto3.client("s3",
+            endpoint_url=MINIO_ENDPOINT,
+            aws_access_key_id=os.getenv("MINIO_ROOT_USER", "admin"),
+            aws_secret_access_key=os.getenv("MINIO_ROOT_PASSWORD", "password"),
+            config=Config(signature_version="s3v4"))
+        prefix = f"mlflow/0/{run_id}/"
+        objs = s3.list_objects_v2(Bucket="lakehouse", Prefix=prefix)
+        for obj in objs.get("Contents", []):
+            s3.delete_object(Bucket="lakehouse", Key=obj["Key"])
+
+        # 3. If this was the active model, reset active marker
+        try:
+            marker = s3.get_object(Bucket="lakehouse", Key="models/active_run_id.txt")
+            active = marker["Body"].read().decode().strip()
+            if active == run_id:
+                s3.delete_object(Bucket="lakehouse", Key="models/active_run_id.txt")
+        except Exception:
+            pass
+
+        return json_util.dumps({"ok": True})
+    except Exception as e:
+        return json_util.dumps({"error": str(e)}), 500
+
+@app.route("/api/services/status")
+def api_services_status():
+    import docker
+    expected = ['kafka', 'mongodb', 'cassandra', 'spark', 'spark-worker', 'flask', 'minio', 'mlflow']
+    services = {}
+    db_mode = os.getenv('DB_MODE', 'cassandra')
+    try:
+        client = docker.from_env()
+        for name in expected:
+            try:
+                c = client.containers.get(name)
+                status = c.status
+                if status == 'running':
+                    if name == db_mode:
+                        status = 'active'
+                    elif name in ('mongodb', 'cassandra'):
+                        status = 'inactive'
+                services[name] = {"status": status, "image": c.image.tags[0] if c.image.tags else "—"}
+            except docker.errors.NotFound:
+                if name in ('mongodb', 'cassandra'):
+                    services[name] = {"status": "inactive", "image": "—"}
+                else:
+                    services[name] = {"status": "stopped", "image": "—"}
+    except Exception as e:
+        return json_util.dumps({"error": str(e), "services": {}})
+    return json_util.dumps({"services": services})
 
 # Setup Kafka
 from kafka import KafkaProducer, KafkaConsumer
@@ -121,16 +456,7 @@ def persist_prediction(data):
 def on_subscribe(data):
     join_room(data['id'])
 
-# Background Kafka consumer for response topic (lazy, se inicia con primera request)
-@app.before_request
-def ensure_consumer():
-    if not hasattr(ensure_consumer, '_started'):
-        ensure_consumer._started = True
-        t = threading.Thread(target=_kafka_response_listener, daemon=True)
-        t.start()
-        s = threading.Thread(target=_kafka_status_listener, daemon=True)
-        s.start()
-
+# Start Kafka consumers
 def _kafka_response_listener():
   consumer = KafkaConsumer(
     KAFKA_RESPONSE_TOPIC,
@@ -142,8 +468,10 @@ def _kafka_response_listener():
     try:
       data = json.loads(msg.value.decode('utf-8'))
       if isinstance(data, dict) and 'UUID' in data:
+        print(f"Consumer processing UUID: {data['UUID'][:12]} ...")
         socketio.emit('spark_status', {'status': 'PROCESSING'}, room=data.get('UUID', ''))
         persist_prediction(data)
+        print(f"Consumer: saved event for {data['UUID'][:12]}")
         socketio.emit('saved', data, room=data.get('UUID', ''))
         socketio.emit('prediction', data, room=data.get('UUID', ''))
     except Exception as e:
@@ -162,6 +490,11 @@ def _kafka_status_listener():
       socketio.emit('spark_status', {'status': status})
     except Exception as e:
       print(f"Status error: {e}")
+
+_kafka_response_listener_thread = threading.Thread(target=_kafka_response_listener, daemon=True)
+_kafka_response_listener_thread.start()
+_kafka_status_listener_thread = threading.Thread(target=_kafka_status_listener, daemon=True)
+_kafka_status_listener_thread.start()
 
 import uuid
 
@@ -616,6 +949,7 @@ def classify_flight_delays_realtime():
       lambda x: socketio.emit('kafka_ack', {'id': unique_id}, room=unique_id)
     )
     p.flush(timeout=10)
+    print(f"Prediction sent: {unique_id[:12]} to {PREDICTION_TOPIC}")
   except Exception as e:
     print(f"Kafka send error: {e}")
 
@@ -663,6 +997,107 @@ def shutdown_server():
 def shutdown():
   shutdown_server()
   return 'Server shutting down...'
+
+MLFLOW_TRACKING_URI = os.getenv('MLFLOW_TRACKING_URI', 'http://mlflow:5000')
+MINIO_ENDPOINT = os.getenv('MINIO_ENDPOINT', 'http://minio:9000')
+MODEL_FIXED_PATH = 's3a://lakehouse/models/spark_random_forest_classifier.flight_delays.5.0.bin'
+MLFLOW_ARTIFACT_ROOT = 's3a://lakehouse/mlflow'
+
+def _mlflow_request(method, path, data=None):
+  import requests
+  url = f"{MLFLOW_TRACKING_URI}/api/2.0/mlflow/{path}"
+  r = requests.request(method, url, json=data, timeout=10)
+  return r.json() if r.status_code == 200 else {}
+
+@app.route("/models")
+def models_page():
+  runs = _mlflow_request("POST", "runs/search", {"experiment_ids": ["0"], "order_by": ["start_time desc"]})
+  model_list = []
+  for run in runs.get("runs", []):
+    info = run["info"]
+    data = run["data"]
+    params = {p["key"]: p["value"] for p in data.get("params", [])}
+    metrics = {m["key"]: m["value"] for m in data.get("metrics", [])}
+    model_list.append({
+      "run_id": info["run_id"],
+      "run_name": info.get("run_name", "—"),
+      "status": info["status"],
+      "start_time": info["start_time"],
+      "params": params,
+      "metrics": metrics,
+    })
+
+  # Check which model is currently active by reading marker file from minio
+  active_run_id = None
+  try:
+    import boto3
+    from botocore.config import Config
+    s3 = boto3.client("s3",
+      endpoint_url=MINIO_ENDPOINT,
+      aws_access_key_id=os.getenv("MINIO_ROOT_USER", "admin"),
+      aws_secret_access_key=os.getenv("MINIO_ROOT_PASSWORD", "password"),
+      config=Config(signature_version="s3v4"))
+    marker = s3.get_object(Bucket="lakehouse", Key="models/active_run_id.txt")
+    active_run_id = marker["Body"].read().decode().strip()
+  except Exception:
+    active_run_id = "builtin"
+
+  return render_template("models.html",
+    models=model_list,
+    active_run_id=active_run_id,
+  )
+
+@app.route("/models/activate/<run_id>")
+def activate_model(run_id):
+  run = _mlflow_request("GET", f"runs/get?run_id={run_id}")
+  run_info = run.get("run", {})
+  if not run_info:
+    return "Run not found", 404
+
+  try:
+    import boto3
+    from botocore.config import Config
+    s3 = boto3.client("s3",
+      endpoint_url=MINIO_ENDPOINT,
+      aws_access_key_id=os.getenv("MINIO_ROOT_USER", "admin"),
+      aws_secret_access_key=os.getenv("MINIO_ROOT_PASSWORD", "password"),
+      config=Config(signature_version="s3v4"))
+
+    src_prefix = f"mlflow/0/{run_id}/artifacts/model/"
+    dst_prefix = "models/spark_random_forest_classifier.flight_delays.5.0.bin/"
+
+    # Find the stage directory inside sparkml/stages/
+    stages = s3.list_objects_v2(Bucket="lakehouse", Prefix=f"{src_prefix}sparkml/stages/", Delimiter="/")
+    stage_prefix = None
+    for p in stages.get("CommonPrefixes", []):
+      stage_prefix = p["Prefix"]
+      break
+
+    if not stage_prefix:
+      return "No model stages found in MLflow artifact", 400
+
+    # Empty destination prefix
+    existing = s3.list_objects_v2(Bucket="lakehouse", Prefix=dst_prefix)
+    for obj in existing.get("Contents", []):
+      s3.delete_object(Bucket="lakehouse", Key=obj["Key"])
+
+    # Copy from stage directory to fixed model path
+    objects = s3.list_objects_v2(Bucket="lakehouse", Prefix=stage_prefix)
+    for obj in objects.get("Contents", []):
+      src_key = obj["Key"]
+      rel_path = src_key[len(stage_prefix):]
+      dst_key = f"{dst_prefix}{rel_path}"
+      s3.copy_object(
+        Bucket="lakehouse",
+        CopySource={"Bucket": "lakehouse", "Key": src_key},
+        Key=dst_key)
+
+    # Write active run marker
+    s3.put_object(Bucket="lakehouse", Key="models/active_run_id.txt", Body=run_id.encode())
+
+    return redirect(url_for("models_page"))
+  except Exception as e:
+    return f"Error activating model: {e}", 500
 
 if __name__ == "__main__":
     socketio.run(

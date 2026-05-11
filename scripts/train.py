@@ -1,9 +1,18 @@
-import sys, os, re, logging
+import sys, os, re, argparse, logging
 from os import environ
+
+import mlflow
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 def main(base_path=None):
+
+  parser = argparse.ArgumentParser()
+  parser.add_argument('--max-bins', type=int, default=4657)
+  parser.add_argument('--max-memory-mb', type=int, default=1024)
+  parser.add_argument('--num-trees', type=int, default=20)
+  parser.add_argument('--max-depth', type=int, default=10)
+  args, _ = parser.parse_known_args()
 
   APP_NAME = "train_spark_mllib_model.py"
   
@@ -138,38 +147,56 @@ def main(base_path=None):
   # Inspect the finalized features
   final_vectorized_features.show()
   
-  # Instantiate and fit random forest classifier on all the data
+  # Instantiate, fit and evaluate random forest classifier
   from pyspark.ml.classification import RandomForestClassifier
-  rfc = RandomForestClassifier(
-    featuresCol="Features_vec",
-    labelCol="ArrDelayBucket",
-    predictionCol="Prediction",
-    maxBins=4657,
-    maxMemoryInMB=1024
-  )
-  model = rfc.fit(final_vectorized_features)
-  
-  model_output_path = "s3a://lakehouse/models/spark_random_forest_classifier.flight_delays.5.0.bin"
-  model.write().overwrite().save(model_output_path)
-  logging.info(f"✅ RandomForest model guardado en {model_output_path}")
-  
-  # Evaluate model using test data
-  predictions = model.transform(final_vectorized_features)
-  
   from pyspark.ml.evaluation import MulticlassClassificationEvaluator
-  evaluator = MulticlassClassificationEvaluator(
-    predictionCol="Prediction",
-    labelCol="ArrDelayBucket",
-    metricName="accuracy"
-  )
-  accuracy = evaluator.evaluate(predictions)
-  print("Accuracy = {}".format(accuracy))
-  
-  # Check the distribution of predictions
-  predictions.groupBy("Prediction").count().show()
-  
-  # Check a sample
-  predictions.sample(False, 0.001, 18).orderBy("CRSDepTime").show(6)
+
+  mlflow.set_tracking_uri(environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000"))
+
+  with mlflow.start_run(run_name="rf_training") as run:
+    rfc = RandomForestClassifier(
+      featuresCol="Features_vec",
+      labelCol="ArrDelayBucket",
+      predictionCol="Prediction",
+      maxBins=args.max_bins,
+      maxMemoryInMB=args.max_memory_mb,
+      numTrees=args.num_trees,
+      maxDepth=args.max_depth
+    )
+
+    mlflow.log_param("maxBins", args.max_bins)
+    mlflow.log_param("maxMemoryInMB", args.max_memory_mb)
+    mlflow.log_param("numTrees", args.num_trees)
+    mlflow.log_param("maxDepth", args.max_depth)
+    mlflow.log_param("model_version", environ.get("MODEL_VERSION", "5.0"))
+
+    model = rfc.fit(final_vectorized_features)
+
+    model_output_path = "s3a://lakehouse/models/spark_random_forest_classifier.flight_delays.5.0.bin"
+    model.write().overwrite().save(model_output_path)
+    logging.info(f"✅ RandomForest model guardado en {model_output_path}")
+
+    predictions = model.transform(final_vectorized_features)
+
+    evaluator = MulticlassClassificationEvaluator(
+      predictionCol="Prediction",
+      labelCol="ArrDelayBucket",
+      metricName="accuracy"
+    )
+    accuracy = evaluator.evaluate(predictions)
+    mlflow.log_metric("accuracy", accuracy)
+    print("Accuracy = {}".format(accuracy))
+
+    # Check the distribution of predictions
+    predictions.groupBy("Prediction").count().show()
+
+    # Check a sample
+    predictions.sample(False, 0.001, 18).orderBy("CRSDepTime").show(6)
+
+    try:
+      mlflow.spark.log_model(model, "model")
+    except Exception as e:
+      print(f"MLflow log_model error (non-fatal): {e}")
 
 if __name__ == "__main__":
   main()
