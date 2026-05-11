@@ -1,6 +1,4 @@
-import os, time, subprocess, logging
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+import os, time, subprocess
 
 class GCPOrchestrator:
     def __init__(self, mode="gcloud", db="cassandra"):
@@ -38,7 +36,7 @@ class GCPOrchestrator:
         return r.returncode == 0
 
     def create_vm(self):
-        logging.info("Creating VM...")
+        log("Creating VM...")
         cloud_init = os.path.join(os.path.dirname(__file__), "cloud-init.yaml")
         cmd = self._base + [
             "instances", "create", self.instance,
@@ -50,7 +48,7 @@ class GCPOrchestrator:
             "--metadata-from-file", f"user-data={cloud_init}",
         ]
         subprocess.run(cmd, check=True)
-        logging.info("VM created. Waiting for SSH...")
+        log("VM created. Waiting for SSH...")
 
     def start_vm(self):
         self._gcloud("instances", "start", self.instance, "--zone", self.zone, check=True)
@@ -118,7 +116,7 @@ class GCPOrchestrator:
 
     def tunnel(self):
         ip = self.get_external_ip()
-        logging.info(f"Tunnel: localhost:5001 -> {ip}:5001")
+        log(f"Tunnel: localhost:5001 -> {ip}:5001")
         cmd = self._base + [
             "ssh", f"{self.user}@{self.instance}",
             "--zone", self.zone,
@@ -127,22 +125,18 @@ class GCPOrchestrator:
         ]
         subprocess.run(cmd)
 
-    def suggest_tunnel(self):
-        ip = self.get_external_ip()
+    @staticmethod
+    def suggest_tunnel():
         print()
         print("=" * 60)
-        print(f"  VM external IP: {ip}")
-        print(f"  Flask:      http://{ip}:5001")
-        print(f"  MLflow:     http://{ip}:5002")
-        print()
-        print("  Tunnel: gcloud compute ssh %s@%s --zone %s -- -L 5001:localhost:5001 -L 5002:localhost:5002 -N" % (
-            self.user, self.instance, self.zone))
+        print("  Deployment complete!")
+        print("  Use `gcloud compute ssh ... -- -L 5001:localhost:5001 -L 5002:localhost:5002 -N` to access")
         print("=" * 60)
 
     # ---- K8S (GKE) ----
 
     def create_gke_cluster(self):
-        logging.info("Creating GKE cluster...")
+        log("Creating GKE cluster...")
         cmd = [
             "gcloud", "container", "--project", self.project,
             "clusters", "create", "ibdn-cluster",
@@ -154,7 +148,7 @@ class GCPOrchestrator:
     def deploy_k8s(self):
         k8s_dir = os.path.join(os.path.dirname(__file__), "k8s")
         if not os.path.isdir(k8s_dir):
-            logging.warning("No k8s/ directory found.")
+            log("No k8s/ directory found.")
             return
         subprocess.run(["kubectl", "apply", "-f", k8s_dir], check=True)
 
@@ -164,7 +158,7 @@ class GCPOrchestrator:
         if self.mode == "gcloud":
             try:
                 if not self.vm_exists():
-                    logging.info("VM not found, creating...")
+                    log("VM not found, creating...")
                     self.create_vm()
                     self.wait_for_vm(timeout=180)
                 else:
@@ -175,10 +169,10 @@ class GCPOrchestrator:
                 self.register_original_model()
                 self.start_prediction()
                 self.suggest_tunnel()
-                logging.info("Opening tunnel (Ctrl+C to stop and shut down VM)...")
+                log("Opening tunnel (Ctrl+C to stop and shut down VM)...")
                 self.tunnel()
             except KeyboardInterrupt:
-                logging.info("Interrupted.")
+                log("Interrupted.")
             finally:
                 self.stop_vm()
 

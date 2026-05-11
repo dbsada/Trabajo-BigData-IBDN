@@ -8,6 +8,16 @@ from enum import Enum
 import rich
 from rich.prompt import Prompt, Confirm
 from rich.panel import Panel
+
+# Load .env file
+_env_path = os.path.join(os.path.dirname(__file__), '.env')
+if os.path.isfile(_env_path):
+    with open(_env_path) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                k, v = line.split('=', 1)
+                os.environ.setdefault(k.strip(), v.strip())
 from rich.console import Console
 from rich.live import Live
 from rich.table import Table
@@ -25,7 +35,8 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("logs/orchestrator.log")
+        logging.FileHandler("logs/orchestrator.log"),
+        logging.StreamHandler(sys.stdout)
     ]
 )
 
@@ -374,10 +385,10 @@ def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
     rich.print("[dim]" + "─" * (console.width-2) + "[/dim]")
 
     while True:
-      main_choice = _quiet_ask(questionary.select(
+      main_choice = questionary.select(
         "ibdn@cluster",
         choices=[ "📋 Menú de logs" ]
-      ))
+      ).ask()
 
       if main_choice is None:
         break
@@ -398,11 +409,11 @@ def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
         rich.print(f"\n   [dim]Servicios: Kafka / Spark (Master) / Spark Worker /\n"
                    f"   Predicción MLlib / {db_label} / Flask / MinIO[/dim]")
         while True:
-          log_choice = _quiet_ask(questionary.autocomplete(
+          log_choice = questionary.autocomplete(
             "📋 Filtrar:",
             choices=log_services,
             complete_style=CompleteStyle.READLINE_LIKE
-          ))
+          ).ask()
 
           if log_choice is None or log_choice == "← Volver":
             break
@@ -437,14 +448,49 @@ def main_docker_gcloud(db):
   from cloud.gcp_orchestrator import GCPOrchestrator
   os.environ['DB_MODE'] = db
   orch = GCPOrchestrator(mode="gcloud")
-  orch.run()
+
+  try:
+    with console.status("[dim]Checking VM...[/dim]", spinner="dots"):
+      exists = orch.vm_exists()
+    if not exists:
+      with console.status("[dim]Creating VM...[/dim]", spinner="dots"):
+        orch.create_vm()
+      with console.status("[dim]Waiting for SSH...[/dim]", spinner="dots"):
+        orch.wait_for_vm(timeout=180)
+    else:
+      with console.status("[dim]Starting VM...[/dim]", spinner="dots"):
+        orch.start_vm()
+      with console.status("[dim]Waiting for SSH...[/dim]", spinner="dots"):
+        orch.wait_for_vm(timeout=120)
+
+    with console.status("[dim]Deploying Docker stack...[/dim]", spinner="dots"):
+      orch.deploy_compose()
+    with console.status("[dim]Running setup pipeline...[/dim]", spinner="dots"):
+      orch.run_pipeline()
+    with console.status("[dim]Registering original model...[/dim]", spinner="dots"):
+      orch.register_original_model()
+    with console.status("[dim]Starting prediction job...[/dim]", spinner="dots"):
+      orch.start_prediction()
+
+    orch.suggest_tunnel()
+    console.print("[yellow]Opening tunnel (Ctrl+C to stop and shut down VM)...[/yellow]")
+    orch.tunnel()
+  except KeyboardInterrupt:
+    console.print("[yellow]Interrupted. Shutting down...[/yellow]")
+  finally:
+    with console.status("[dim]Stopping VM...[/dim]", spinner="dots"):
+      orch.stop_vm()
 
 def main_kubernetes_gke(db):
   """Deploy to GKE cluster"""
   from cloud.gcp_orchestrator import GCPOrchestrator
   os.environ['DB_MODE'] = db
   orch = GCPOrchestrator(mode="gke")
-  orch.run()
+  with console.status("[dim]Creating GKE cluster...[/dim]", spinner="dots"):
+    orch.create_gke_cluster()
+  with console.status("[dim]Deploying K8s manifests...[/dim]", spinner="dots"):
+    orch.deploy_k8s()
+  orch.suggest_tunnel()
 
 if __name__ == '__main__':
   os.system('clear')
