@@ -8,6 +8,7 @@ from enum import Enum
 import rich
 from rich.prompt import Prompt, Confirm
 from rich.panel import Panel
+from utils.shell import sh
 
 # Load .env file
 _env_path = os.path.join(os.path.dirname(__file__), '.env')
@@ -81,38 +82,24 @@ class ClusterManager:
     self.venv_python = os.path.join(self.project_home, '.venv/bin/python3')
 
     self.docker = self.DockerMode(self)
-    # self.kubernetes = self.KubernetesMode(self)
 
-  def _run_command(self, command, cwd=None, wait=True, start_new_session=False):
-    if wait:
-      process = subprocess.run(command, shell=True, cwd=cwd, capture_output=True, text=True)
-      
-      if process.returncode != 0:
-        console = Console()
-        
-        # Recopilamos el error de donde venga
-        raw_error = process.stderr.strip() or process.stdout.strip() or "No hay mensaje de error (stdout/stderr vacíos)"
-        
-        error_msg = f"[bold red]Comando:[/bold red] [white]{command}[/white]\n"
-        error_msg += f"[bold yellow]Directorio:[/bold yellow] [white]{cwd or os.getcwd()}[/white]\n"
-        error_msg += f"[bold yellow]Código de salida:[/bold yellow] [white]{process.returncode}[/white]\n"
-        error_msg += f"[hr]\n[bold cyan]Mensaje de error:[/bold cyan]\n[green]{raw_error}[/green]"
-        
-        console.print()
-        console.print(Panel(error_msg, title="[bold red]❌ Fallo detectado[/bold red]", border_style="red", expand=False))
-        return None
-      
-      logging.info(f'Éxito: {command}')
-      return process.stdout
-    else:
-      log_name = f'logs/{command.split("/")[-1].split(" ")[0]}.log'
-      log_file = open(log_name, 'w')
-      logging.info(f'Lanzando servicio en segundo plano: {command} (Log: {log_name})')
-      return subprocess.Popen(command, shell=True, cwd=cwd, stdout=log_file, stderr=log_file, start_new_session=start_new_session)
+  @sh
+  def _cmd(self, command):
+    return command
+
+  def _run_popen(self, command, cwd=None):
+    log_name = f'logs/{command.split("/")[-1].split(" ")[0]}.log'
+    log_file = open(log_name, 'w')
+    logging.info(f'Lanzando servicio en segundo plano: {command} (Log: {log_name})')
+    return subprocess.Popen(command, shell=True, cwd=cwd, stdout=log_file, stderr=log_file, start_new_session=True)
+
+  @sh
+  def _run_python_script(self, script_path):
+    return f"{self.venv_python} {script_path}"
 
   def run_local_script(self, script_name):
     script_path = os.path.join(self.project_home, 'scripts', script_name)
-    return self._run_command(f"{self.venv_python} {script_path}")
+    return self._run_python_script(script_path)
 
   def _wait_for_port(self, port, timeout=20):
     '''
@@ -144,16 +131,15 @@ class ClusterManager:
     except:
       return False
 
+  @sh(check=True)
   def _get_vm_ip(self):
-    try:
-      return subprocess.run(
-        ['hostname', '-I'], capture_output=True, text=True, check=True
-      ).stdout.strip().split()[0]
-    except:
-      return 'localhost'
+    return 'hostname -I'
 
   def _build_svc_table(self, services):
-    vm_ip = self._get_vm_ip()
+    try:
+      vm_ip = self._get_vm_ip().stdout.strip().split()[0]
+    except Exception:
+      vm_ip = 'localhost'
     table = Table(box=box.ROUNDED, title="Starting Services")
     table.add_column("Service", style="cyan", min_width=12)
     table.add_column("Status", justify="center", min_width=6, max_width=8)
@@ -168,14 +154,32 @@ class ClusterManager:
       table.add_row(Text(s["name"], style=name_style), status,
                     str(s["port"]) if s.get("port") else "-", url)
     return table
-    
+
+  @sh(timeout=5)
+  def _lsof_port(self, port):
+    return f"lsof -i :{port} -sTCP:LISTEN"
+
   class DockerMode:
     def __init__(self, manager):
       self.m = manager
       self.db = self.Database(manager)
       self.spark = self.Spark(manager)
       self.kafka = self.Kafka(manager)
-    
+
+    @sh
+    def _docker_compose_up(self, db):
+      return f"cd {self.m.project_home} && docker compose --profile db_{db} up -d --build"
+
+    @sh
+    def _cassandra_nodetool(self):
+      container = os.getenv('CASSANDRA_CONTAINER', 'cassandra')
+      return f"docker exec {container} nodetool status 2>&1 | grep -q '^UN'"
+
+    @sh
+    def _cassandra_cqlsh(self):
+      container = os.getenv('CASSANDRA_CONTAINER', 'cassandra')
+      return f"docker exec {container} cqlsh -e 'DESCRIBE KEYSPACES' 2>/dev/null"
+
     def start_services(self, db: Literal['mongo', 'cassandra']):
       global _status_line
       _status_line = ""
@@ -203,7 +207,7 @@ class ClusterManager:
         has_docker = False
         for name, port in busy:
           msg += f"  • {name} (puerto {port})"
-          lsof = subprocess.run(["lsof", "-i", f":{port}", "-sTCP:LISTEN"], capture_output=True, text=True, timeout=5)
+          lsof = self.m._lsof_port(port)
           lines = lsof.stdout.strip().splitlines()
           if len(lines) > 1:
             for line in lines[1:]:
@@ -230,8 +234,7 @@ class ClusterManager:
         console.print(Panel(msg, title="[bold red]❌ Puerto(s) ocupado(s)[/bold red]", border_style="red", expand=False))
         sys.exit(1)
 
-      run_step(console, "Building Docker images", self.m._run_command,
-        f'docker compose --profile db_{db} up -d --build', cwd=self.m.project_home)
+      run_step(console, "Building Docker images", self._docker_compose_up, db)
 
       db_label = "MongoDB" if db == 'mongo' else "Cassandra"
       db_port = int(os.getenv('MONGODB_PORT', '27017')) if db == 'mongo' else int(os.getenv('CASSANDRA_PORT', '9042'))
@@ -267,22 +270,12 @@ class ClusterManager:
               s["status"] = spinner[frame % len(spinner)]
 
           if cassandra_nodetool_pending:
-            node_un = subprocess.run(
-              f"docker exec {os.getenv('CASSANDRA_CONTAINER', 'cassandra')} "
-              f"nodetool status 2>&1 | grep -q '^UN'",
-              shell=True, capture_output=True
-            ).returncode == 0
-            if node_un:
+            if self._cassandra_nodetool().returncode == 0:
               cassandra_nodetool_pending = False
               cassandra_cql_pending = True
 
           if cassandra_cql_pending:
-            cql_ready = subprocess.run(
-              f"docker exec {os.getenv('CASSANDRA_CONTAINER', 'cassandra')} "
-              f"cqlsh -e 'DESCRIBE KEYSPACES' 2>/dev/null",
-              shell=True, capture_output=True
-            ).returncode == 0
-            if cql_ready:
+            if self._cassandra_cqlsh().returncode == 0:
               for s in services:
                 if s["name"] == "Cassandra":
                   s["ready"] = True
@@ -295,26 +288,28 @@ class ClusterManager:
       _status_line = ""
       logging.info('Todos los servicios están listos.')
 
+    @sh
+    def _docker_compose_logs(self, service_name, log_file):
+      return f"cd {self.m.project_home} && docker compose logs --no-color {service_name} > {log_file}"
+
+    @sh
+    def _less_file(self, log_file):
+      return f"less -S +G {log_file}"
+
     def show_service_logs(self, service_name: str):
       '''
       Guarda los logs del servicio en logs/ y luego los abre con less.
-      '''        
+      '''
       log_file = f"logs/docker_{service_name}.log"
       logging.info(f"💾 Actualizando archivo de log: {log_file}")
-      dump_cmd = f"docker compose logs --no-color {service_name} > {log_file}"
-      subprocess.run(dump_cmd, shell=True, cwd=self.m.project_home)
-      
-      # Abrimos el archivo que acabamos de crear/actualizar
-      cmd = f"less -S +G {log_file}"
-      subprocess.run(cmd, shell=True)
+      self._docker_compose_logs(service_name, log_file)
+      self._less_file(log_file)
 
     class Database:
       def __init__(self, manager):
         self.m = manager
 
       def import_distances(self):
-        # DB_MODE ('mongo' o 'cassandra') se decide en start_services()
-        # y lo resuelve internamente scripts/import_distances.py
         db_mode = os.getenv('DB_MODE', 'cassandra')
         label = "Cassandra" if db_mode == 'cassandra' else "MongoDB"
         logging.info(f"📊 Importando distancias a {label}...")
@@ -327,7 +322,7 @@ class ClusterManager:
         self.prediction_log = os.getenv('PREDICTION_LOG', 'logs/flight_prediction_2.13-0.1.jar.log')
 
       def upload_to_minio(self, local_path, minio_key):
-        """Sube un archivo local a MinIO via mc pipe"""
+        """Sube un archivo local a MinIO via mc pipe (usa stdin, no usa @sh)"""
         if not os.path.exists(local_path):
           logging.error(f"Archivo no encontrado: {local_path}")
           return None
@@ -356,15 +351,15 @@ class ClusterManager:
             self.upload_to_minio(local_path, key)
         logging.info("✅ Archivos subidos a MinIO")
 
-      def train_model(self):
-        logging.info("🧠 Iniciando entrenamiento Spark MLlib...")
+      @sh
+      def _spark_train_model(self):
         spark_master = os.getenv('SPARK_MASTER_URL', 'spark://spark:7077')
         access_key = os.getenv('MINIO_ROOT_USER', 'admin')
         secret_key = os.getenv('MINIO_ROOT_PASSWORD', 'password')
         minio_endpoint = os.getenv('MINIO_ENDPOINT', 'http://minio:9000')
         prediction_jar = os.getenv('PREDICTION_JAR',
           '/app/flight_prediction/target/scala-2.13/flight_prediction_2.13-0.1.jar')
-        cmd = (
+        return (
           f"docker exec {self.container_name} spark-submit "
           f"--master {spark_master} "
           f"--deploy-mode cluster "
@@ -379,18 +374,19 @@ class ClusterManager:
           f"--class es.upm.dit.ging.predictor.TrainModel "
           f"{prediction_jar}"
         )
-        return self.m._run_command(cmd)
 
-      def predict_delay(self):
-        logging.info("🧠 Lanzando predicción en Spark...")
+      def train_model(self):
+        logging.info("🧠 Iniciando entrenamiento Spark MLlib...")
+        return self._spark_train_model()
+
+      def _spark_predict_cmd(self):
         spark_master = os.getenv('SPARK_MASTER_URL', 'spark://spark:7077')
         minio_endpoint = os.getenv('MINIO_ENDPOINT', 'http://minio:9000')
         access_key = os.getenv('MINIO_ROOT_USER', 'admin')
         secret_key = os.getenv('MINIO_ROOT_PASSWORD', 'password')
-        prediction_jar = os.getenv('PREDICTION_JAR', 
+        prediction_jar = os.getenv('PREDICTION_JAR',
           '/app/flight_prediction/target/scala-2.13/flight_prediction_2.13-0.1.jar')
-        
-        cmd = (
+        return (
           f"docker exec {self.container_name} spark-submit "
           f"--master {spark_master} "
           f"--deploy-mode cluster "
@@ -404,38 +400,56 @@ class ClusterManager:
           f"--class es.upm.dit.ging.predictor.MakePrediction "
           f"{prediction_jar}"
         )
-        return self.m._run_command(cmd, wait=False)
+
+      def predict_delay(self):
+        logging.info("🧠 Lanzando predicción en Spark...")
+        cmd = self._spark_predict_cmd()
+        return self.m._run_popen(cmd)
+
+      @sh
+      def _show_prediction_logs(self):
+        return f"less -S +G {self.prediction_log}"
 
       def show_prediction_logs(self):
         '''Abre el log del JAR de Scala con less'''
         if os.path.exists(self.prediction_log):
-          subprocess.run(f"less -S +G {self.prediction_log}", shell=True)
+          self._show_prediction_logs()
         else:
           rich.print("[bold red]Archivo de log no encontrado.[/bold red]")
-        
+
     class Kafka:
       def __init__(self, manager):
         self.m = manager
         self.name = os.getenv('KAFKA_CONTAINER', 'kafka')
 
-      def create_topic(self, topic_name):
-        logging.info(f"📝 Creando tópico '{topic_name}' en Docker...")
+      @sh
+      def _create_kafka_topic(self, topic_name):
         kafka_local = os.getenv('KAFKA_LOCAL_BOOTSTRAP_SERVERS', 'localhost:9092')
-        cmd = (
-            f"docker exec {self.name} /opt/kafka/bin/kafka-topics.sh "
-            f"--create --bootstrap-server {kafka_local} "
-            f"--topic {topic_name} --partitions 1 --replication-factor 1 --if-not-exists"
+        return (
+          f"docker exec {self.name} /opt/kafka/bin/kafka-topics.sh "
+          f"--create --bootstrap-server {kafka_local} "
+          f"--topic {topic_name} --partitions 1 --replication-factor 1 --if-not-exists"
         )
-        return self.m._run_command(cmd)
+
+      def create_topic(self, topic_name):
+        return self._create_kafka_topic(topic_name)
 
   class KubernetesMode:
     def __init__(self, manager):
       raise NotImplementedError('Modo Kubernetes no implementado aún.')
 
+@sh
+def _check_docker():
+  return 'docker info'
+
+@sh
+def _docker_compose_down_all(project_home):
+  return f"cd {project_home} && docker compose --profile db_mongo --profile db_cassandra down 2>/dev/null"
+
 def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
   manager = ClusterManager()
 
-  docker_check = subprocess.run('docker info', shell=True, capture_output=True)
+  docker_check = _check_docker()
   if docker_check.returncode != 0:
     console.print()
     console.print(Panel(
@@ -447,68 +461,69 @@ def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
     ))
     sys.exit(1)
 
-  run_step(console, "Cleaning previous sessions", lambda: subprocess.run(
-    'docker compose --profile db_mongo --profile db_cassandra down 2>/dev/null',
-    shell=True, cwd=manager.project_home, capture_output=True))
+  run_step(console, "Cleaning previous sessions", _docker_compose_down_all, manager.project_home)
 
   try:
     manager.docker.start_services(db=db)
 
     vm_ip = 'localhost'
     try:
-      vm_ip = subprocess.run(
-        ['hostname', '-I'], capture_output=True, text=True, check=True
-      ).stdout.strip().split()[0]
+      vm_ip = manager._get_vm_ip().stdout.strip().split()[0]
     except Exception:
       pass
 
     result = run_step(console, "Creating MinIO bucket", manager.run_local_script, 'create_bucket.py')
-    if result is None:
+    if result.returncode != 0:
       logging.error("Fallo en create_bucket.py. Abortando.")
       return
-    set_status("Bucket created \u2713")
+    set_status("Bucket created ✓")
 
     result = run_step(console, "Downloading data", manager.run_local_script, 'download_data.py')
-    if result is None:
+    if result.returncode != 0:
       logging.error("Fallo en download_data.py. Abortando.")
       return
-    set_status("Data downloaded \u2713")
+    set_status("Data downloaded ✓")
 
     run_step(console, "Uploading data to MinIO", manager.docker.spark.upload_data_to_minio)
-    set_status("Data uploaded to MinIO \u2713")
+    set_status("Data uploaded to MinIO ✓")
 
     result = run_step(console, "Importing distances to Cassandra", manager.docker.db.import_distances)
-    if result is None:
+    if result.returncode != 0:
       logging.error("Fallo en import_distances. Abortando.")
       return
-    set_status("Distances imported \u2713")
+    set_status("Distances imported ✓")
 
     def _create_topics():
       r = manager.docker.kafka.create_topic(os.getenv('KAFKA_TOPIC', 'flight-delay-ml-request'))
-      if r is not None:
-        r = manager.docker.kafka.create_topic(os.getenv('KAFKA_RESPONSE_TOPIC', 'flight-delay-ml-response'))
-      if r is not None:
-        r = manager.docker.kafka.create_topic(os.getenv('KAFKA_STATUS_TOPIC', 'flight-delay-ml-status'))
+      if r.returncode != 0:
+        return r
+      r = manager.docker.kafka.create_topic(os.getenv('KAFKA_RESPONSE_TOPIC', 'flight-delay-ml-response'))
+      if r.returncode != 0:
+        return r
+      r = manager.docker.kafka.create_topic(os.getenv('KAFKA_STATUS_TOPIC', 'flight-delay-ml-status'))
       return r
     result = run_step(console, "Creating Kafka topics", _create_topics)
-    if result is None:
+    if result.returncode != 0:
       logging.error("Fallo en create_topic. Abortando.")
       return
-    set_status("Kafka topics created \u2713")
+    set_status("Kafka topics created ✓")
 
     result = run_step(console, "Starting Spark streaming job", manager.docker.spark.predict_delay)
     if result is None:
       logging.error("Fallo en predict_delay. Abortando.")
       return
-    set_status("Spark streaming running \u2713")
+    set_status("Spark streaming running ✓")
 
-    run_step(console, "Reloading Flask API", lambda: subprocess.run(
-      "docker restart flask", shell=True, capture_output=True))
+    @sh
+    def _restart_flask():
+      return "docker restart flask"
+
+    run_step(console, "Reloading Flask API", _restart_flask)
     flk_port = os.getenv('FLASK_PORT', '5001')
     manager._wait_for_http(f"http://{vm_ip}:{flk_port}/", timeout=30)
 
     set_status(f"API ready: http://{vm_ip}:{flk_port}/")
-    
+
     set_status("")
 
     rich.print(f"\n[bold]Cluster ready[/bold]  ·  [dim]Press Ctrl+C to shutdown[/dim]")
@@ -520,11 +535,17 @@ def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
   except KeyboardInterrupt:
     set_status("Shutting down cluster...")
   finally:
-    run_step(console, "Stopping containers", manager._run_command,
-      'docker compose --profile db_mongo --profile db_cassandra down',
-      cwd=manager.project_home)
+    @sh
+    def _docker_compose_down():
+      return f"cd {manager.project_home} && docker compose --profile db_mongo --profile db_cassandra down"
+
+    run_step(console, "Stopping containers", _docker_compose_down)
     _status_line = ""
     set_status("Containers stopped. Goodbye!")
+
+@sh
+def _sbt_package(cwd):
+  return f"cd {cwd} && sbt package"
 
 def main_docker_gcloud(db):
   """Deploy to GCloud VM via Docker Compose"""
@@ -546,8 +567,8 @@ def main_docker_gcloud(db):
 
     run_step(console, "Deploying code from GitHub", orch.deploy_code)
     run_step(console, "Configuring .env", orch.deploy_env)
-    run_step(console, "Building prediction JAR", lambda: subprocess.run(
-      "sbt package", shell=True, cwd=os.path.join(project_home, "flight_prediction"), capture_output=True).check_returncode())
+    sbt_dir = os.path.join(project_home, "flight_prediction")
+    run_step(console, "Building prediction JAR", _sbt_package, sbt_dir)
     run_step(console, "Deploying JAR to VM", lambda: orch.deploy_jar(
       os.path.join(project_home, "flight_prediction/target/scala-2.13/flight_prediction_2.13-0.1.jar")))
     run_step(console, "Pulling Docker images", lambda: [orch.deploy_down(), orch.deploy_pull()])
