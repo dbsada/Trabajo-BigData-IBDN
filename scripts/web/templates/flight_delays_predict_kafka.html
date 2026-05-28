@@ -475,6 +475,12 @@ function loadModels() {
     html += '</div>';
 
     if (data.models.length === 0) {
+      html += '<table style="width:100%;border-collapse:collapse;font-size:0.8rem">';
+      html += '<thead><tr style="border-bottom:1px solid #2a2a3a">';
+      html += '<th style="padding:0.35rem 0.2rem;width:28px"></th>';
+      html += '<th style="padding:0.35rem 0.5rem;text-align:left;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Name</th>';
+      html += '<th style="padding:0.35rem 0.5rem;text-align:right;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Date</th>';
+      html += '</tr></thead><tbody></tbody></table>';
       html += '<div style="padding:1rem;text-align:center;color:#555;font-size:0.8rem">No trained models yet. Train one first.</div>';
     } else {
       html += '<table style="width:100%;border-collapse:collapse;font-size:0.8rem">';

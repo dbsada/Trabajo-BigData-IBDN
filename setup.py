@@ -502,6 +502,8 @@ def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
       return
     set_status("Spark streaming running \u2713")
 
+    run_step(console, "Reloading Flask API", lambda: subprocess.run(
+      "docker restart flask", shell=True, capture_output=True))
     flk_port = os.getenv('FLASK_PORT', '5001')
     manager._wait_for_http(f"http://{vm_ip}:{flk_port}/", timeout=30)
 
