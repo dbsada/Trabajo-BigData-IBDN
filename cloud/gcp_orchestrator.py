@@ -40,6 +40,7 @@ class GCPOrchestrator:
         return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
 
     def _show_error(self, title, detail):
+        _log_console.print()
         _log_console.print(Panel(
             f"[red]{title}[/red]\n\n[dim]{detail.strip()[:2000]}[/dim]",
             border_style="red", expand=False
@@ -115,6 +116,9 @@ class GCPOrchestrator:
         else:
             log("Cloning repository...")
             self._ssh_or_fail(f"git clone {github_repo} {self.repo}", "git clone")
+
+    def deploy_env(self):
+        self._ssh_or_fail(f"cp {self.repo}/.env.example {self.repo}/.env", "deploy_env")
 
     def deploy_compose(self):
         commands = [
@@ -219,6 +223,7 @@ class GCPOrchestrator:
                     self.start_vm()
                     self.wait_for_vm(timeout=120)
                 self.deploy_code()
+                self.deploy_env()
                 self.deploy_compose()
                 self.run_pipeline()
                 self.start_prediction()

@@ -73,6 +73,7 @@ class ClusterManager:
         error_msg += f"[bold yellow]Código de salida:[/bold yellow] [white]{process.returncode}[/white]\n"
         error_msg += f"[hr]\n[bold cyan]Mensaje de error:[/bold cyan]\n[green]{raw_error}[/green]"
         
+        console.print()
         console.print(Panel(error_msg, title="[bold red]❌ Fallo detectado[/bold red]", border_style="red", expand=False))
         return None
       
@@ -200,6 +201,7 @@ class ClusterManager:
             "  • Cerrar Docker Desktop desde la bandeja del sistema si no lo necesitas\n"
           )
         msg += "\nLibera los puertos o cambia la configuración en .env antes de continuar."
+        console.print()
         console.print(Panel(msg, title="[bold red]❌ Puerto(s) ocupado(s)[/bold red]", border_style="red", expand=False))
         sys.exit(1)
 
@@ -410,6 +412,7 @@ def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
 
   docker_check = subprocess.run('docker info', shell=True, capture_output=True)
   if docker_check.returncode != 0:
+    console.print()
     console.print(Panel(
       "[bold red]Docker no está encendido.[/bold red]\n\n"
       "Por favor, abre Docker Desktop y espera a que esté listo antes de ejecutar setup.py",
@@ -524,6 +527,8 @@ def main_docker_gcloud(db):
 
     with console.status("[dim]Deploying code from GitHub...[/dim]", spinner="dots"):
       orch.deploy_code()
+    with console.status("[dim]Configuring .env...[/dim]", spinner="dots"):
+      orch.deploy_env()
     with console.status("[dim]Deploying Docker stack...[/dim]", spinner="dots"):
       orch.deploy_compose()
     with console.status("[dim]Running setup pipeline...[/dim]", spinner="dots"):
