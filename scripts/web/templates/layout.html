@@ -158,6 +158,78 @@ body {
         100% { filter: none; }
       }
       .sv-arrow { transition: stroke 0.3s, fill 0.3s; }
+
+      /* Log viewer slide-up panel */
+      .log-panel {
+        position: fixed; bottom: 0; left: 0; right: 0;
+        background: #1a1a24; border-top: 1px solid #2a2a3a;
+        z-index: 900; transform: translateY(100%);
+        transition: transform 0.3s ease;
+        box-shadow: 0 -4px 20px rgba(0,0,0,0.5);
+        height: 350px;
+      }
+      .log-panel.open { transform: translateY(0); }
+      .log-panel.resizing { transition: none; }
+      .log-resize-handle {
+        position: absolute; top: -4px; left: 0; right: 0;
+        height: 8px; cursor: ns-resize; z-index: 10;
+      }
+      .log-resize-handle:hover, .log-resize-handle.dragging {
+        background: #2563eb40;
+      }
+      .log-panel-header {
+        display: flex; align-items: center; gap: 0.75rem;
+        padding: 0.6rem 1rem; border-bottom: 1px solid #2a2a3a;
+        background: #1e1e2a; position: relative;
+      }
+      .log-panel-header select {
+        width: 160px; background: #16161e; border: 1px solid #2a2a3a;
+        color: #d0d0d8; padding: 0.3rem 0.5rem; border-radius: 4px;
+        font-size: 0.75rem; outline: none; font-family: inherit;
+      }
+      .log-panel-header select:focus { border-color: #3b82f6; }
+      .log-panel-header button {
+        background: #2a2a3a; color: #b0b0b8; border: 1px solid #3a3a4e;
+        padding: 0.3rem 0.7rem; border-radius: 4px; font-size: 0.7rem;
+        cursor: pointer; font-weight: 500;
+      }
+      .log-panel-header button:hover { background: #3a3a4e; }
+      .log-panel-header button.active { background: #2563eb20; border-color: #2563eb; color: #60a5fa; }
+      .log-pause-btn {
+        padding: 0.3rem 0.5rem !important; font-size: 0.85rem !important;
+        min-width: 32px; text-align: center;
+      }
+      .log-clear-btn {
+        padding: 0.3rem 0.5rem !important; font-size: 0.85rem !important;
+        min-width: 32px; text-align: center;
+      }
+      .log-panel-body {
+        height: calc(100% - 44px); overflow-y: auto; padding: 0.5rem 1rem;
+        font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+        font-size: 0.7rem; line-height: 1.6; color: #888;
+        white-space: pre-wrap; word-break: break-all;
+      }
+      .log-panel-body::-webkit-scrollbar { width: 6px; }
+      .log-panel-body::-webkit-scrollbar-track { background: #16161e; }
+      .log-panel-body::-webkit-scrollbar-thumb { background: #3a3a4e; border-radius: 3px; }
+      .log-service-tag { display: inline-block; padding: 0 0.3rem; border-radius: 2px; font-weight: 600; font-size: 0.65rem; margin-right: 0.4rem; }
+      .log-close-btn {
+        margin-left: auto; background: none; border: none; color: #888;
+        cursor: pointer; font-size: 1.1rem; padding: 0.2rem;
+      }
+      .log-close-btn:hover { color: #e05a5a; }
+      .log-toggle-btn {
+        position: fixed; bottom: 0; left: 50%; transform: translateX(-50%);
+        z-index: 899; background: #1e1e2a; border: 1px solid #2a2a3a;
+        border-bottom: none; color: #60a5fa;
+        width: 48px; height: 24px; border-radius: 8px 8px 0 0;
+        cursor: pointer; display: flex; align-items: center; justify-content: center;
+        font-size: 0.9rem; transition: all 0.2s;
+        box-shadow: 0 -2px 8px rgba(0,0,0,0.3);
+      }
+      .log-toggle-btn:hover { background: #2563eb20; border-color: #2563eb; }
+      .log-toggle-btn.visible { opacity: 0; pointer-events: none; }
+      .log-toggle-btn svg { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
       a { color: #60a5fa; text-decoration: none; }
       a:hover { text-decoration: underline; }
     </style>

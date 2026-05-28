@@ -1,4 +1,4 @@
-import sys, os, re
+import sys, os, re, logging
 from flask import Flask, render_template, request, redirect, url_for
 from pymongo import MongoClient
 from bson import json_util
@@ -17,6 +17,13 @@ import predict_utils
 static_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
 app = Flask(__name__, static_folder=static_folder)
 socketio = SocketIO(app, cors_allowed_origins="*")
+
+# Suppress Werkzeug access logs for /api/logs/ endpoints
+class LogFilter(logging.Filter):
+    def filter(self, record):
+        return '/api/logs/' not in record.getMessage()
+
+logging.getLogger('werkzeug').addFilter(LogFilter())
 
 MONGODB_URI = os.getenv('MONGODB_URI', 'mongodb://mongodb:27017/')
 MONGODB_DATABASE = os.getenv('MONGODB_DATABASE', 'agile_data_science')
@@ -218,6 +225,7 @@ def _restart_prediction_job():
 @app.route("/api/prediction/restart", methods=["POST"])
 def api_restart_prediction():
     _restart_prediction_job()
+    return json_util.dumps({"ok": True})
 
 @app.route("/api/prediction/status")
 def api_prediction_status():
@@ -420,27 +428,123 @@ def api_services_status():
     import docker
     expected = ['kafka', 'mongodb', 'cassandra', 'spark', 'spark-worker', 'flask', 'minio', 'mlflow']
     services = {}
-    db_mode = os.getenv('DB_MODE', 'cassandra')
     try:
         client = docker.from_env()
         for name in expected:
             try:
                 c = client.containers.get(name)
                 status = c.status
-                if status == 'running':
-                    if name == db_mode:
-                        status = 'active'
-                    elif name in ('mongodb', 'cassandra'):
-                        status = 'inactive'
                 services[name] = {"status": status, "image": c.image.tags[0] if c.image.tags else "—"}
             except docker.errors.NotFound:
-                if name in ('mongodb', 'cassandra'):
-                    services[name] = {"status": "inactive", "image": "—"}
-                else:
-                    services[name] = {"status": "stopped", "image": "—"}
+                services[name] = {"status": "stopped", "image": "—"}
     except Exception as e:
         return json_util.dumps({"error": str(e), "services": {}})
     return json_util.dumps({"services": services})
+
+@app.route("/api/logs/<service>")
+def api_service_logs(service):
+    import docker
+    try:
+        client = docker.from_env()
+        container = client.containers.get(service)
+        since = request.args.get('since', 0, type=int)
+        if since > 0:
+            logs = container.logs(timestamps=False)
+        else:
+            tail = 2000 if service == 'flask' else request.args.get('tail', 500, type=int)
+            logs = container.logs(tail=tail, timestamps=False)
+        text = logs.decode('utf-8', errors='replace')
+        if service == 'flask':
+            lines = text.split('\n')
+            lines = [l for l in lines if '/api/logs/' not in l]
+            text = '\n'.join(lines[since:])
+        else:
+            lines = text.split('\n')
+            text = '\n'.join(lines[since:])
+        return json_util.dumps({"logs": text, "service": service, "status": container.status, "total": len(lines)})
+    except docker.errors.NotFound:
+        return json_util.dumps({"error": f"Container {service} not found", "logs": ""}), 404
+    except Exception as e:
+        return json_util.dumps({"error": str(e), "logs": ""}), 500
+
+@app.route("/api/logs/all")
+def api_all_logs():
+    import docker, re, glob as glb
+    from datetime import datetime
+    db_mode = os.environ.get('DB_MODE', 'cassandra')
+    services = ['kafka', 'spark', 'spark-worker', 'flask', 'minio', 'mlflow']
+    if db_mode == 'mongodb':
+        services.append('mongodb')
+    else:
+        services.append('cassandra')
+    colors = {'kafka':'#9c36b5','spark':'#fdc41b','spark-worker':'#fdc41b','cassandra':'#2f9e44','mongodb':'#2f9e44','flask':'#1971c2','minio':'#e05a5a','mlflow':'#60a5fa'}
+    since = request.args.get('since', 0, type=int)
+    all_lines = []
+    try:
+        client = docker.from_env()
+        for name in services:
+            try:
+                container = client.containers.get(name)
+                if since > 0:
+                    logs = container.logs(timestamps=True)
+                else:
+                    fetch_tail = 400 if name == 'flask' else 250
+                    logs = container.logs(tail=fetch_tail, timestamps=True)
+                text = logs.decode('utf-8', errors='replace')
+                for line in text.split('\n'):
+                    if not line.strip():
+                        continue
+                    if name == 'flask' and '/api/logs/' in line:
+                        continue
+                    ts_match = re.match(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+)Z\s(.*)', line)
+                    if ts_match:
+                        ts_str = ts_match.group(1)[:26]
+                        content = ts_match.group(2)
+                        try:
+                            ts = datetime.strptime(ts_str + 'Z', '%Y-%m-%dT%H:%M:%S.%fZ')
+                        except:
+                            ts = datetime.min
+                        all_lines.append((ts, name, colors.get(name,'#888'), content))
+                    else:
+                        all_lines.append((datetime.min, name, colors.get(name,'#888'), line))
+
+                # For spark-worker, also read Spark driver stdout files
+                if name == 'spark-worker':
+                    try:
+                        result = container.exec_run("sh -c 'ls -t /opt/spark/work/driver-*/stdout 2>/dev/null | head -1'")
+                        if result.exit_code == 0 and result.output.strip():
+                            latest_stdout = result.output.decode().strip()
+                            tail_result = container.exec_run(f'tail -200 {latest_stdout}')
+                            if tail_result.exit_code == 0:
+                                driver_text = tail_result.output.decode('utf-8', errors='replace')
+                                for line in driver_text.split('\n'):
+                                    if not line.strip():
+                                        continue
+                                    if line.startswith('[SPARK]'):
+                                        ts = datetime.now()
+                                        content = line
+                                        all_lines.append((ts, 'spark', colors['spark'], content))
+                    except Exception:
+                        pass
+            except docker.errors.NotFound:
+                pass
+        all_lines.sort(key=lambda x: x[0])
+        total = len(all_lines)
+        if since > 0:
+            all_lines = all_lines[since:]
+        available = len(all_lines)
+        all_lines = all_lines[-1000:]
+        if available > 1000:
+            marker = '<div style="text-align:center;padding:2rem;color:#555;font-size:0.8rem">---- ' + str(available - 1000) + ' líneas anteriores omitidas ----</div>\n'
+        else:
+            marker = ''
+        interleaved = []
+        for ts, svc, color, content in all_lines:
+            tag = '<span class="log-service-tag" style="background:'+color+'20;color:'+color+'">'+svc+'</span>'
+            interleaved.append(tag + content)
+        return json_util.dumps({"logs": marker + '\n'.join(interleaved), "interleaved": True, "count": len(interleaved), "total": total})
+    except Exception as e:
+        return json_util.dumps({"error": str(e), "logs": "", "interleaved": False}), 500
 
 # Setup Kafka
 from kafka import KafkaProducer, KafkaConsumer

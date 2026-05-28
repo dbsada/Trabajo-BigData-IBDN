@@ -133,13 +133,6 @@ function getDropdown(input) {
   <rect id="sv-spark" x="60" y="48" width="180" height="40" rx="6" fill="#1e1e2a" stroke="#fdc41b" stroke-width="2" class="sv-node"/>
   <text x="150" y="68" fill="#d0d0d8" font-size="12" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">SPARK</text>
 
-  <rect id="sv-bbdd" x="255" y="48" width="80" height="40" rx="6" fill="#1e1e2a" stroke="#2f9e44" stroke-width="2" class="sv-node"/>
-  {% if DB_MODE == 'cassandra' %}
-  <text x="295" y="68" fill="#d0d0d8" font-size="10" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">CASSANDRA</text>
-  {% else %}
-  <text x="295" y="68" fill="#d0d0d8" font-size="11" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">MONGODB</text>
-  {% endif %}
-
   <rect id="sv-kafka-l" x="70" y="163" width="80" height="36" rx="6" fill="#1e1e2a" stroke="#9c36b5" stroke-width="2" class="sv-node"/>
   <text x="110" y="181" fill="#d0d0d8" font-size="11" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">KAFKA</text>
 
@@ -147,6 +140,13 @@ function getDropdown(input) {
   <text x="200" y="181" fill="#d0d0d8" font-size="11" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">KAFKA</text>
 
   <rect x="58" y="150" width="194" height="62" rx="8" fill="none" stroke="#555" stroke-width="1" stroke-dasharray="3,3"/>
+
+  <rect id="sv-bbdd" x="270" y="163" width="80" height="36" rx="6" fill="#1e1e2a" stroke="#2f9e44" stroke-width="2" class="sv-node"/>
+  {% if DB_MODE == 'cassandra' %}
+  <text x="310" y="181" fill="#d0d0d8" font-size="10" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">CASSANDRA</text>
+  {% else %}
+  <text x="310" y="181" fill="#d0d0d8" font-size="11" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">MONGODB</text>
+  {% endif %}
 
   <rect id="sv-flask" x="60" y="280" width="180" height="40" rx="6" fill="#1e1e2a" stroke="#1971c2" stroke-width="2" class="sv-node"/>
   <text x="150" y="300" fill="#d0d0d8" font-size="12" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">FLASK</text>
@@ -166,12 +166,12 @@ function getDropdown(input) {
     <polygon points="110,87 104,97 116,97"/>
   </g>
   <g id="sv-a2" class="sv-arrow">
-    <path d="M 240 68 L 255 68" fill="none" stroke-width="5"/>
-    <polygon points="261,68 251,62 251,74"/>
-  </g>
-  <g id="sv-a3" class="sv-arrow">
     <path d="M 200 88 L 200 158" fill="none" stroke-width="5"/>
     <polygon points="200,164 194,154 206,154"/>
+  </g>
+  <g id="sv-a3" class="sv-arrow">
+    <path d="M 240 181 L 270 181" fill="none" stroke-width="5"/>
+    <polygon points="276,181 266,175 266,187"/>
   </g>
   <g id="sv-a4" class="sv-arrow">
     <path d="M 200 199 L 200 275" fill="none" stroke-width="5"/>
@@ -213,14 +213,48 @@ function getDropdown(input) {
   <div style="font-size:0.75rem;color:#888;margin-bottom:0.5rem;text-transform:uppercase;letter-spacing:0.5px;font-weight:500">Services</div>
   <div id="services-content" style="padding:0.5rem 0"></div>
 </div>
+<div id="tab-logs" class="tab-panel">
+  <div style="font-size:0.75rem;color:#888;margin-bottom:0.5rem;text-transform:uppercase;letter-spacing:0.5px;font-weight:500">Logs</div>
+  <div id="logs-content" style="padding:0.5rem 0"></div>
+</div>
 </div>
 
 <div class="tab-dots">
   <span class="dot active" data-index="0"></span>
   <span class="dot" data-index="1"></span>
   <span class="dot" data-index="2"></span>
+  <span class="dot" data-index="3"></span>
 </div>
 </div>
+
+<!-- Log slide-up panel -->
+<div class="log-panel" id="log-panel">
+  <div class="log-resize-handle" id="log-resize-handle"></div>
+  <div class="log-panel-header">
+    <span style="font-size:0.75rem;color:#888;font-weight:500;text-transform:uppercase">Logs</span>
+    <select id="log-service-select">
+      <option value="all">All Services</option>
+      <option value="kafka">Kafka</option>
+      <option value="spark">Spark</option>
+      <option value="spark-worker">Spark Worker</option>
+      {% if DB_MODE == 'cassandra' %}
+      <option value="cassandra">Cassandra</option>
+      {% else %}
+      <option value="mongodb">MongoDB</option>
+      {% endif %}
+      <option value="flask">Flask</option>
+      <option value="mlflow">MLflow</option>
+      <option value="minio">MinIO</option>
+    </select>
+    <button class="log-pause-btn" id="log-pause-btn" title="Pause auto-refresh">⏸</button>
+    <button class="log-clear-btn" id="log-clear-btn" title="Clear log display">🗑</button>
+    <button class="log-close-btn" id="log-panel-close">&times;</button>
+  </div>
+  <div class="log-panel-body" id="log-panel-body"></div>
+</div>
+<button class="log-toggle-btn" id="log-toggle-btn" title="View Logs">
+  <svg viewBox="0 0 24 24"><polyline points="18 15 12 9 6 15"/></svg>
+</button>
 
 <script src="https://cdn.socket.io/4.5.0/socket.io.min.js"></script>
 <script>
@@ -239,7 +273,7 @@ function resetArch() {
 }
 
 function advanceArch() {
-  var arrowsOn = [[0],[1],[2,3],[4],[],[]];
+  var arrowsOn = [[0],[1],[2],[3],[4],[]];
 
   if (stepIndex > 0) {
     (arrowsOn[stepIndex - 1] || []).forEach(function(idx) {
@@ -282,6 +316,7 @@ function checkActiveModel() {
     if (!btn) return;
     btn.disabled = !data.active_run_id;
     btn.title = data.active_run_id ? '' : 'No active model — train one first in Models tab';
+    if (data.active_run_id) btn.textContent = 'Predict';
   });
 }
 
@@ -372,6 +407,7 @@ carousel.addEventListener('scroll', function() {
   dots.forEach(function(d, i) { d.classList.toggle('active', i === idx); });
   if (idx === 1) loadModels();
   if (idx === 2) loadServices();
+  if (idx === 3) loadLogsTab();
 });
 
 function showModelDetail(model, activeRunId) {
@@ -387,8 +423,8 @@ function showModelDetail(model, activeRunId) {
   var isActive = model.run_id === activeRunId;
   var params = model.params || {};
   var metrics = model.metrics || {};
-  var date = new Date(model.start_time).toLocaleString();
-  var acc = model.status === 'RUNNING' ? 'Training…' : metrics.accuracy !== undefined ? (metrics.accuracy * 100).toFixed(1) + '%' : '—';
+  var date = model.start_time && model.start_time > 0 ? new Date(model.start_time).toLocaleString() : '—';
+  var acc = model.status === 'RUNNING' ? '—' : metrics.accuracy !== undefined ? (metrics.accuracy * 100).toFixed(1) + '%' : '—';
 
   var html = '<div style="background:#1e1e2a;border:1px solid #2a2a3a;border-radius:10px;padding:1.2rem;width:340px;max-height:90vh;overflow-y:auto">';
   html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.8rem">';
@@ -485,18 +521,18 @@ function loadModels() {
     } else {
       html += '<table style="width:100%;border-collapse:collapse;font-size:0.8rem">';
       html += '<thead><tr style="border-bottom:1px solid #2a2a3a">';
-      html += '<th style="padding:0.35rem 0.2rem;width:28px"></th>';
+      html += '<th style="padding:0.35rem 0.2rem;width:24px;text-align:center"><input type="checkbox" id="select-all-checks" style="cursor:pointer"></th>';
       html += '<th style="padding:0.35rem 0.5rem;text-align:left;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Name</th>';
       html += '<th style="padding:0.35rem 0.5rem;text-align:right;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Date</th>';
       html += '</tr></thead><tbody>';
 
       data.models.forEach(function(m) {
-        var date = new Date(m.start_time).toLocaleDateString();
+        var date = m.start_time && m.start_time > 0 ? new Date(m.start_time).toLocaleDateString() : '—';
         var isActive = m.run_id === data.active_run_id;
         html += '<tr class="model-row" data-run="' + m.run_id + '" style="border-bottom:1px solid #1e1e28">';
         html += '<td style="padding:0.35rem 0.2rem;text-align:center"><input type="checkbox" class="model-check" data-run="' + m.run_id + '"></td>';
-        html += '<td style="padding:0.35rem 0.5rem;color:#d0d0d8;cursor:pointer" class="model-name">' + (m.run_name || m.run_id.slice(0, 8)) + (isActive ? ' <span style="color:#22c55e;font-size:0.65rem">● active</span>' : '') + '</td>';
-        html += '<td style="padding:0.35rem 0.5rem;text-align:right;color:#555;cursor:pointer" class="model-name">' + date + '</td>';
+        html += '<td style="padding:0.35rem 0.5rem;color:#d0d0d8;cursor:pointer" class="model-name">' + (m.run_name || m.run_id.slice(0, 8)) + '</td>';
+        html += '<td style="padding:0.35rem 0.5rem;text-align:right;color:#555;cursor:pointer" class="model-name">' + date + (isActive ? ' <span style="color:#22c55e;font-size:0.7rem;font-weight:600">✓ active</span>' : '') + '</td>';
         html += '</tr>';
       });
 
@@ -508,9 +544,24 @@ function loadModels() {
     html += '</div>';
     c.innerHTML = html;
 
-    fetch('/api/models/train/status').then(function(r) { return r.json(); }).then(function(s) {
-      if (s.status === 'running') showTrainingRow(s.elapsed);
-    });
+    (function checkTrainStatus() {
+      fetch('/api/models/train/status').then(function(r) { return r.json(); }).then(function(s) {
+        var btn = document.getElementById('train-btn');
+        if (!btn) return;
+        if (s.status === 'running') {
+          btn.disabled = true;
+          btn.style.opacity = '0.5';
+          btn.style.cursor = 'not-allowed';
+          btn.textContent = 'Training in progress…';
+          showTrainingRow(s.elapsed);
+        } else {
+          btn.disabled = false;
+          btn.style.opacity = '1';
+          btn.style.cursor = 'pointer';
+          btn.textContent = 'Train New Model';
+        }
+      });
+    })();
 
     c.querySelectorAll('.model-name').forEach(function(cell) {
       cell.addEventListener('click', function(e) {
@@ -524,6 +575,16 @@ function loadModels() {
     c.querySelectorAll('.model-check').forEach(function(cb) {
       cb.addEventListener('change', updateDeleteBtn);
     });
+
+    var selectAll = document.getElementById('select-all-checks');
+    if (selectAll) {
+      selectAll.addEventListener('change', function() {
+        c.querySelectorAll('.model-check').forEach(function(cb) {
+          cb.checked = selectAll.checked;
+        });
+        updateDeleteBtn();
+      });
+    }
 
     var delBtn = document.getElementById('delete-selected-btn');
     if (delBtn) {
@@ -610,16 +671,30 @@ document.getElementById('start-train-btn').addEventListener('click', function() 
 var trainingPollTimer = null;
 var trainingTickTimer = null;
 function showTrainingRow(elapsed) {
+  var existing = document.querySelector('.training-row');
+  if (existing && trainingPollTimer) {
+    var ts = existing.querySelector('.train-elapsed');
+    if (ts) ts.textContent = elapsed + 's';
+    return;
+  }
   if (trainingPollTimer) { clearTimeout(trainingPollTimer); trainingPollTimer = null; }
   if (trainingTickTimer) { clearInterval(trainingTickTimer); trainingTickTimer = null; }
 
   var c = document.getElementById('models-content');
   if (!c) return;
 
-  var existing = c.querySelector('.training-row');
   if (!existing) {
     var tbody = c.querySelector('tbody');
-    if (!tbody) { modelsLoaded = false; loadModels(); return; }
+    if (!tbody) {
+      var tbl = document.createElement('table');
+      tbl.style.cssText = 'width:100%;border-collapse:collapse;font-size:0.8rem';
+      var th = document.createElement('thead');
+      th.innerHTML = '<tr style="border-bottom:1px solid #2a2a3a"><th style="padding:0.35rem 0.2rem;width:24px;text-align:center"><input type="checkbox" id="select-all-checks" style="cursor:pointer"></th><th style="padding:0.35rem 0.5rem;text-align:left;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Name</th><th style="padding:0.35rem 0.5rem;text-align:right;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Date</th></tr>';
+      tbody = document.createElement('tbody');
+      tbl.appendChild(th);
+      tbl.appendChild(tbody);
+      c.insertBefore(tbl, c.querySelector('div'));
+    }
     var html = '<tr class="training-row"><td colspan="3" style="padding:0.5rem;border-top:1px solid #2a2a3a">';
     html += '<div style="display:flex;align-items:center;gap:0.75rem">';
     html += '<span style="color:#60a5fa;font-size:0.75rem;white-space:nowrap"><span class="pulse-gear">&#9881;</span> Training</span>';
@@ -642,6 +717,9 @@ function showTrainingRow(elapsed) {
         loadModels();
       });
     }
+  } else {
+    var ts = existing.querySelector('.train-elapsed');
+    if (ts) ts.textContent = elapsed + 's';
   }
 
   var tick = elapsed;
@@ -665,6 +743,13 @@ function showTrainingRow(elapsed) {
         if (trainingTickTimer) { clearInterval(trainingTickTimer); trainingTickTimer = null; }
         var row = document.querySelector('.training-row');
         if (row) row.remove();
+        var btn = document.getElementById('train-btn');
+        if (btn) {
+          btn.disabled = false;
+          btn.style.opacity = '1';
+          btn.style.cursor = 'pointer';
+          btn.textContent = 'Train New Model';
+        }
         modelsLoaded = false;
         loadModels();
       }
@@ -703,6 +788,161 @@ function loadServices() {
     c.innerHTML = '<div style="text-align:center;padding:1rem;color:#e05a5a;font-size:0.85rem">Failed to load services</div>';
   });
 }
+
+// Log viewer
+var logsTabLoaded = false;
+var logAutoInterval = null;
+var logPanelOpen = false;
+var logPaused = false;
+var logClearOffset = 0;
+var logTotalCount = 0;
+var logState = { service: null, sizes: {} };
+
+function loadLogsTab() {
+  if (logsTabLoaded) return;
+  logsTabLoaded = true;
+  var c = document.getElementById('logs-content');
+  c.innerHTML = '<div style="text-align:center;padding:1rem;color:#555;font-size:0.85rem">Click the arrow button to open the log viewer</div>';
+  c.innerHTML += '<div style="text-align:center;padding:0.5rem"><button id="open-log-panel-btn" style="background:#2563eb;color:#fff;border:none;padding:0.4rem 1rem;border-radius:4px;font-size:0.75rem;cursor:pointer;font-weight:500">Open Log Viewer</button></div>';
+  document.getElementById('open-log-panel-btn').addEventListener('click', function() {
+    openLogPanel();
+  });
+}
+
+function openLogPanel() {
+  document.getElementById('log-panel').classList.add('open');
+  document.getElementById('log-toggle-btn').classList.add('visible');
+  logPanelOpen = true;
+  logPaused = false;
+  logClearOffset = 0;
+  logTotalCount = 0;
+  document.getElementById('log-pause-btn').textContent = '⏸';
+  logState = { service: null, firstLoad: true };
+  fetchLogs();
+  logAutoInterval = setInterval(fetchLogs, 500);
+}
+
+function closeLogPanel() {
+  document.getElementById('log-panel').classList.remove('open');
+  document.getElementById('log-toggle-btn').classList.remove('visible');
+  logPanelOpen = false;
+  if (logAutoInterval) { clearInterval(logAutoInterval); logAutoInterval = null; }
+}
+
+function toggleLogPause() {
+  logPaused = !logPaused;
+  document.getElementById('log-pause-btn').textContent = logPaused ? '▶' : '⏸';
+  document.getElementById('log-pause-btn').title = logPaused ? 'Resume auto-refresh' : 'Pause auto-refresh';
+  if (!logPaused) {
+    logState.firstLoad = true;
+    fetchLogs();
+  }
+}
+
+function clearLogs() {
+  logPaused = true;
+  document.getElementById('log-pause-btn').textContent = '▶';
+  document.getElementById('log-panel-body').innerHTML = '<div style="text-align:center;padding:2rem;color:#555;font-size:0.8rem">Logs cleared. Press ▶ to resume.</div>';
+  logClearOffset = logTotalCount;
+  logState.firstLoad = true;
+  console.log('[logs] cleared, offset=' + logClearOffset);
+}
+
+function resumeLogs() {
+  logPaused = false;
+  document.getElementById('log-pause-btn').textContent = '⏸';
+  logState.firstLoad = true;
+  fetchLogs();
+}
+
+function fetchLogs() {
+  if (logPaused) return;
+  var service = document.getElementById('log-service-select').value;
+  var body = document.getElementById('log-panel-body');
+  var url = service === 'all' ? '/api/logs/all' : '/api/logs/' + service;
+  if (logClearOffset > 0) {
+    url += (url.indexOf('?') >= 0 ? '&' : '?') + 'since=' + logClearOffset;
+    console.log('[logs] fetching with since=' + logClearOffset + ' total=' + logTotalCount);
+  }
+
+  var wasAtBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 80;
+  var isFirst = logState && logState.firstLoad;
+
+  fetch(url).then(function(r) { return r.json(); }).then(function(data) {
+    if (data.error) { body.innerHTML = '<div style="color:#e05a5a">' + data.error + '</div>'; return; }
+
+    if (data.total !== undefined) {
+      logTotalCount = data.total;
+    }
+
+    if (service === 'all' && data.interleaved) {
+      body.innerHTML = '';
+      var pre = document.createElement('pre');
+      pre.style.cssText = 'margin:0;font:inherit;color:inherit';
+      pre.innerHTML = data.logs || '';
+      body.appendChild(pre);
+    } else {
+      var lines = (data.logs || '').split('\n');
+      body.innerHTML = '';
+      var pre = document.createElement('pre');
+      pre.style.cssText = 'margin:0;font:inherit;color:inherit';
+      pre.textContent = lines.join('\n');
+      body.appendChild(pre);
+    }
+    if (isFirst) { logState.firstLoad = false; body.scrollTop = body.scrollHeight; }
+    else if (wasAtBottom) { body.scrollTop = body.scrollHeight; }
+  }).catch(function() {
+    if (!body.textContent) body.innerHTML = '<div style="text-align:center;padding:2rem;color:#e05a5a">Failed to load logs</div>';
+  });
+}
+
+function escapeHtml(text) {
+  var div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+// Resize handle
+var resizeHandle = document.getElementById('log-resize-handle');
+var isResizing = false;
+var resizeStartY = 0;
+var resizeStartHeight = 0;
+
+resizeHandle.addEventListener('mousedown', function(e) {
+  isResizing = true;
+  resizeStartY = e.clientY;
+  var panel = document.getElementById('log-panel');
+  resizeStartHeight = panel.offsetHeight;
+  panel.classList.add('resizing');
+  resizeHandle.classList.add('dragging');
+  e.preventDefault();
+});
+
+document.addEventListener('mousemove', function(e) {
+  if (!isResizing) return;
+  var delta = resizeStartY - e.clientY;
+  var newHeight = Math.max(150, Math.min(700, resizeStartHeight + delta));
+  document.getElementById('log-panel').style.height = newHeight + 'px';
+});
+
+document.addEventListener('mouseup', function() {
+  if (!isResizing) return;
+  isResizing = false;
+  document.getElementById('log-panel').classList.remove('resizing');
+  resizeHandle.classList.remove('dragging');
+});
+
+// Event listeners
+document.getElementById('log-panel-close').addEventListener('click', closeLogPanel);
+document.getElementById('log-toggle-btn').addEventListener('click', openLogPanel);
+document.getElementById('log-pause-btn').addEventListener('click', toggleLogPause);
+document.getElementById('log-clear-btn').addEventListener('click', clearLogs);
+document.getElementById('log-service-select').addEventListener('change', function() {
+  logClearOffset = 0;
+  logTotalCount = 0;
+  if (logState) logState.firstLoad = true;
+  fetchLogs();
+});
 </script>
 <script src="/static/flight_delay_predict_polling.js"></script>
 {% endblock %}
