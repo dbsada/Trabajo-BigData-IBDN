@@ -544,7 +544,7 @@ def main_docker_gcloud(db):
     run_step(console, "Deploying code from GitHub", orch.deploy_code)
     run_step(console, "Configuring .env", orch.deploy_env)
     run_step(console, "Pulling Docker images", lambda: [orch.deploy_down(), orch.deploy_pull()])
-    run_step(console, "Building Spark image (may take 5-10 min)", orch.deploy_build)
+    run_step(console, "Building Spark image (may take ~30 min)", orch.deploy_build)
     run_step(console, "Starting containers", orch.deploy_up)
     run_step(console, "Running setup pipeline", orch.run_pipeline)
     run_step(console, "Starting prediction job", orch.start_prediction)

@@ -1,9 +1,21 @@
-import os
+import os, time
 import boto3
 from botocore.config import Config
+from botocore.exceptions import EndpointConnectionError, ConnectionClosedError
 import logging
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+
+def _wait_for_minio(fn, retries=12, delay=5):
+    for attempt in range(retries):
+        try:
+            return fn()
+        except (EndpointConnectionError, ConnectionClosedError) as e:
+            if attempt < retries - 1:
+                logging.warning(f"MinIO no disponible (intento {attempt+1}/{retries}): {e}")
+                time.sleep(delay)
+            else:
+                raise
 
 def main():
     s3 = boto3.client(
@@ -16,7 +28,7 @@ def main():
     )
 
     bucket_name = os.getenv('ICEBERG_CATALOG', 'lakehouse')
-    buckets = [b['Name'] for b in s3.list_buckets()['Buckets']]
+    buckets = _wait_for_minio(lambda: [b['Name'] for b in s3.list_buckets()['Buckets']])
     if bucket_name not in buckets:
         s3.create_bucket(Bucket=bucket_name)
         logging.info(f"✅ Bucket '{bucket_name}' creado en MinIO")

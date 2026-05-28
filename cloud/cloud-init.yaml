@@ -7,4 +7,5 @@ runcmd:
   - systemctl enable docker
   - systemctl start docker
   - usermod -aG docker ubuntu
+  - pip3 install boto3 --break-system-packages
   - echo "VM ready for IBDN deployment"
