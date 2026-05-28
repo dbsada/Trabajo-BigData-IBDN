@@ -41,14 +41,20 @@ class GCPOrchestrator:
 
     def _show_error(self, title, detail):
         _log_console.print()
+        lines = detail.strip().splitlines()
+        if len(lines) > 30:
+            shown = "...\n" + "\n".join(lines[-30:])
+        else:
+            shown = detail.strip()[:2000]
         _log_console.print(Panel(
-            f"[red]{title}[/red]\n\n[dim]{detail.strip()[:2000]}[/dim]",
+            f"[red]{title}[/red]\n\n[dim]{shown}[/dim]",
             border_style="red", expand=False
         ))
 
     def _ssh_or_fail(self, command, label=""):
         r = self._ssh(command)
         if r.returncode != 0:
+            logging.error(f"{label} failed (exit {r.returncode})\nFull stderr saved below:\n{r.stderr.strip()}")
             self._show_error(f"{label} falló", r.stderr)
             raise RuntimeError(f"{label} (exit {r.returncode})")
         return r
@@ -73,6 +79,7 @@ class GCPOrchestrator:
         ]
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
+            logging.error(f"VM creation failed (exit {r.returncode})\n{r.stderr.strip()}")
             self._show_error("VM creation falló", r.stderr)
             raise RuntimeError(f"VM creation failed (exit {r.returncode})")
         log("VM created.")
