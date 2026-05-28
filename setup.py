@@ -529,15 +529,22 @@ def main_docker_gcloud(db):
       orch.deploy_code()
     with console.status("[dim]Configuring .env...[/dim]", spinner="dots"):
       orch.deploy_env()
-    with console.status("[dim]Deploying Docker stack...[/dim]", spinner="dots"):
-      orch.deploy_compose()
+    with console.status("[dim]Pulling Docker images...[/dim]", spinner="dots"):
+      orch.deploy_down()
+      orch.deploy_pull()
+    with console.status("[dim]Building Spark image (may take 5-10 min)...[/dim]", spinner="dots"):
+      orch.deploy_build()
+    with console.status("[dim]Starting containers...[/dim]", spinner="dots"):
+      orch.deploy_up()
     with console.status("[dim]Running setup pipeline...[/dim]", spinner="dots"):
       orch.run_pipeline()
     with console.status("[dim]Starting prediction job...[/dim]", spinner="dots"):
       orch.start_prediction()
 
     orch.suggest_tunnel()
-    console.print("[yellow]Opening tunnel (Ctrl+C to stop and shut down VM)...[/yellow]")
+    with console.status("[dim]Configuring IAP tunnel...[/dim]", spinner="dots"):
+      orch.ensure_iap()
+    console.print("[yellow]Opening IAP tunnels (Ctrl+C to stop and shut down VM)...[/yellow]")
     orch.tunnel()
   except KeyboardInterrupt:
     console.print("[yellow]Interrupted. Shutting down...[/yellow]")
@@ -561,13 +568,12 @@ def main_kubernetes_gke(db):
   orch.suggest_tunnel()
 
 if __name__ == '__main__':
-  os.system('clear')
   print()
   title_panel = Panel(
       Align.center(Text.assemble(
           ("\nCluster Orchestrator", "bold white"),
           (" · ", "dim white"),
-          ("v2.0\n", "bold cyan"),
+          ("v1.0\n", "bold cyan"),
           ("Flight Delay Prediction\n", "dim white"),
       )),
       border_style="bright_blue",

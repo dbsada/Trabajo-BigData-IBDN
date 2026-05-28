@@ -74,7 +74,7 @@ class GCPOrchestrator:
             "--machine-type=e2-standard-4",
             "--image-family=ubuntu-2204-lts",
             "--image-project=ubuntu-os-cloud",
-            "--boot-disk-size=30",
+            "--boot-disk-size=50",
             "--metadata-from-file", f"user-data={cloud_init}",
         ]
         r = subprocess.run(cmd, capture_output=True, text=True)
@@ -127,13 +127,22 @@ class GCPOrchestrator:
     def deploy_env(self):
         self._ssh_or_fail(f"cp {self.repo}/.env.example {self.repo}/.env", "deploy_env")
 
+    def deploy_pull(self):
+        self._ssh_or_fail(f"cd {self.repo} && docker compose --profile db_{self.db} pull", "docker pull")
+
+    def deploy_build(self):
+        self._ssh_or_fail(f"cd {self.repo} && docker compose --profile db_{self.db} build", "docker build")
+
+    def deploy_up(self):
+        self._ssh_or_fail(f"cd {self.repo} && docker compose --profile db_{self.db} up -d", "docker up")
+
     def deploy_compose(self):
-        commands = [
-            f"cd {self.repo} && docker compose --profile db_{self.db} down 2>/dev/null; true",
-            f"cd {self.repo} && docker compose --profile db_{self.db} up -d --build",
-        ]
-        for cmd in commands:
-            self._ssh_or_fail(cmd, "docker compose up")
+        self.deploy_pull()
+        self.deploy_build()
+        self.deploy_up()
+
+    def deploy_down(self):
+        self._ssh(f"cd {self.repo} && docker compose --profile db_{self.db} down 2>/dev/null; true")
 
     def run_pipeline(self):
         env = f"DB_MODE={self.db}"
@@ -179,22 +188,68 @@ class GCPOrchestrator:
 
     # ---- Tunnel ----
 
+    def ensure_iap(self):
+        """Enable IAP API and add firewall rule for IAP tunnel access"""
+        log("Enabling IAP API...")
+        subprocess.run(
+            ["gcloud", "services", "enable", "iap.googleapis.com",
+             "--project", self.project],
+            capture_output=True, timeout=60)
+
+        rules = subprocess.run(
+            ["gcloud", "compute", "firewall-rules", "list",
+             "--filter=name=allow-iap", "--project", self.project,
+             "--format=value(name)"],
+            capture_output=True, text=True, timeout=10)
+        if "allow-iap" not in rules.stdout:
+            log("Creating IAP firewall rule...")
+            subprocess.run([
+                "gcloud", "compute", "firewall-rules", "create", "allow-iap",
+                "--direction=INGRESS", "--priority=1000",
+                "--network=default", "--action=ALLOW",
+                "--rules=tcp:5001,tcp:5002",
+                "--source-ranges=35.235.240.0/20",
+                "--project", self.project,
+            ], capture_output=True, check=True, timeout=30)
+            log("IAP firewall rule created")
+
     def tunnel(self):
-        ip = self.get_external_ip()
-        log(f"Tunnel: localhost:5001 -> {ip}:5001")
-        cmd = self._base + [
-            "ssh", f"{self.user}@{self.instance}",
-            "--zone", self.zone,
-            "--", "-L", "5001:localhost:5001",
-            "-L", "5002:localhost:5002", "-N",
-        ]
-        subprocess.run(cmd)
+        log("Starting IAP tunnels...")
+        procs = []
+        ports = [5001, 5002]
+        os.makedirs("logs", exist_ok=True)
+        try:
+            for port in ports:
+                cmd = [
+                    "gcloud", "compute", "start-iap-tunnel",
+                    self.instance, str(port),
+                    "--local-host-port", f"localhost:{port}",
+                    "--zone", self.zone, "--project", self.project,
+                ]
+                log_file = open(f"logs/iap_tunnel_{port}.log", "w")
+                p = subprocess.Popen(cmd, stdout=log_file, stderr=log_file)
+                procs.append(p)
+                time.sleep(3)
+
+            log(f"IAP tunnels ready: localhost:{ports[0]}, localhost:{ports[1]}")
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            log("Stopping tunnels...")
+        finally:
+            for p in procs:
+                p.terminate()
+                try: p.wait(timeout=5)
+                except: p.kill()
 
     @staticmethod
     def suggest_tunnel():
         _log_console.print()
         _log_console.print(Panel(
-            "  [bold]Deployment complete![/bold]\n  [dim]Use `gcloud compute ssh ... -- -L 5001:localhost:5001 -L 5002:localhost:5002 -N` to access[/dim]",
+            "  [bold]Deployment complete![/bold]\n"
+            "  [dim]Flask UI:[/dim] http://localhost:5001\n"
+            "  [dim]MLflow:[/dim]  http://localhost:5002\n\n"
+            "  Access via IAP (GCloud auth required). No ports exposed publicly.",
             border_style="green", expand=False
         ))
 
@@ -231,11 +286,12 @@ class GCPOrchestrator:
                     self.wait_for_vm(timeout=120)
                 self.deploy_code()
                 self.deploy_env()
-                self.deploy_compose()
+                self.deploy_compose()  # pull + build + up
                 self.run_pipeline()
                 self.start_prediction()
                 self.suggest_tunnel()
-                log("Opening tunnel (Ctrl+C to stop and shut down VM)...")
+                self.ensure_iap()
+                log("Opening IAP tunnels (Ctrl+C to stop and shut down VM)...")
                 self.tunnel()
             except KeyboardInterrupt:
                 log("Interrupted.")
