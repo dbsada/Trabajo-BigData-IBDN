@@ -32,11 +32,25 @@ class GCPOrchestrator:
         return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
 
     def _ssh(self, command, **kwargs):
+        kwargs.pop("check", None)
         cmd = self._base + [
             "ssh", f"{self.user}@{self.instance}",
             "--zone", self.zone, "--command", command, "--quiet",
         ]
         return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
+
+    def _show_error(self, title, detail):
+        _log_console.print(Panel(
+            f"[red]{title}[/red]\n\n[dim]{detail.strip()[:2000]}[/dim]",
+            border_style="red", expand=False
+        ))
+
+    def _ssh_or_fail(self, command, label=""):
+        r = self._ssh(command)
+        if r.returncode != 0:
+            self._show_error(f"{label} falló", r.stderr)
+            raise RuntimeError(f"{label} (exit {r.returncode})")
+        return r
 
     # ---- VM Control ----
 
@@ -58,7 +72,8 @@ class GCPOrchestrator:
         ]
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
-            raise RuntimeError(f"VM creation failed:\n{r.stderr.strip()}")
+            self._show_error("VM creation falló", r.stderr)
+            raise RuntimeError(f"VM creation failed (exit {r.returncode})")
         log("VM created.")
 
     def start_vm(self):
@@ -96,10 +111,10 @@ class GCPOrchestrator:
         r = self._ssh(f"test -d {self.repo}/.git")
         if r.returncode == 0:
             log("Pulling latest code...")
-            self._ssh(f"cd {self.repo} && git pull", check=True)
+            self._ssh_or_fail(f"cd {self.repo} && git pull", "git pull")
         else:
             log("Cloning repository...")
-            self._ssh(f"git clone {github_repo} {self.repo}", check=True)
+            self._ssh_or_fail(f"git clone {github_repo} {self.repo}", "git clone")
 
     def deploy_compose(self):
         commands = [
@@ -107,7 +122,7 @@ class GCPOrchestrator:
             f"cd {self.repo} && docker compose --profile db_{self.db} up -d --build",
         ]
         for cmd in commands:
-            self._ssh(cmd, check=True)
+            self._ssh_or_fail(cmd, "docker compose up")
 
     def run_pipeline(self):
         env = f"DB_MODE={self.db}"
@@ -132,7 +147,7 @@ class GCPOrchestrator:
             f"cd {self.repo} && docker exec kafka /opt/kafka/bin/kafka-topics.sh --create --bootstrap-server localhost:9092 --topic flight-delay-ml-status --partitions 1 --replication-factor 1 --if-not-exists 2>/dev/null; true",
         ]
         for cmd in commands:
-            self._ssh(cmd, check=True)
+            self._ssh_or_fail(cmd, "Pipeline step")
 
     def start_prediction(self):
         cmd = (
