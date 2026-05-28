@@ -49,6 +49,31 @@ def set_status(text):
     sys.stdout.flush()
     _status_line = text
 
+def run_step(console, label, func, *args, **kwargs):
+    """Ejecuta func dentro de un spinner que muestra el tiempo transcurrido"""
+    import threading, time
+    status = console.status(f"[dim]{label}[/dim]", spinner="dots")
+    start = time.time()
+    stop_event = threading.Event()
+
+    def update():
+        while not stop_event.is_set():
+            elapsed = int(time.time() - start)
+            if elapsed < 60:
+                status.update(f"[dim]{label} ({elapsed}s)[/dim]")
+            else:
+                status.update(f"[dim]{label} ({elapsed//60}m{elapsed%60:02d}s)[/dim]")
+            time.sleep(1)
+
+    timer = threading.Thread(target=update, daemon=True)
+    with status:
+        timer.start()
+        try:
+            return func(*args, **kwargs)
+        finally:
+            stop_event.set()
+            timer.join(1)
+
 class ClusterManager:
   def __init__(self):
     self.home = os.path.expanduser('~')
@@ -205,8 +230,8 @@ class ClusterManager:
         console.print(Panel(msg, title="[bold red]❌ Puerto(s) ocupado(s)[/bold red]", border_style="red", expand=False))
         sys.exit(1)
 
-      with console.status("[dim]Building Docker images (may take minutes)[/dim]", spinner="dots"):
-          self.m._run_command(f'docker compose --profile db_{db} up -d --build', cwd=self.m.project_home)
+      run_step(console, "Building Docker images", self.m._run_command,
+        f'docker compose --profile db_{db} up -d --build', cwd=self.m.project_home)
 
       db_label = "MongoDB" if db == 'mongo' else "Cassandra"
       db_port = int(os.getenv('MONGODB_PORT', '27017')) if db == 'mongo' else int(os.getenv('CASSANDRA_PORT', '9042'))
@@ -422,9 +447,9 @@ def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
     ))
     sys.exit(1)
 
-  with console.status("[dim]Cleaning previous sessions[/dim]", spinner="dots"):
-    subprocess.run('docker compose --profile db_mongo --profile db_cassandra down 2>/dev/null',
-      shell=True, cwd=manager.project_home, capture_output=True)
+  run_step(console, "Cleaning previous sessions", lambda: subprocess.run(
+    'docker compose --profile db_mongo --profile db_cassandra down 2>/dev/null',
+    shell=True, cwd=manager.project_home, capture_output=True))
 
   try:
     manager.docker.start_services(db=db)
@@ -437,44 +462,41 @@ def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
     except Exception:
       pass
 
-    with console.status("[dim]Creating MinIO bucket[/dim]", spinner="dots"):
-      result = manager.run_local_script('create_bucket.py')
+    result = run_step(console, "Creating MinIO bucket", manager.run_local_script, 'create_bucket.py')
     if result is None:
       logging.error("Fallo en create_bucket.py. Abortando.")
       return
     set_status("Bucket created \u2713")
 
-    with console.status("[dim]Downloading data[/dim]", spinner="dots"):
-      result = manager.run_local_script('download_data.py')
+    result = run_step(console, "Downloading data", manager.run_local_script, 'download_data.py')
     if result is None:
       logging.error("Fallo en download_data.py. Abortando.")
       return
     set_status("Data downloaded \u2713")
 
-    with console.status("[dim]Uploading data to MinIO[/dim]", spinner="dots"):
-      manager.docker.spark.upload_data_to_minio()
+    run_step(console, "Uploading data to MinIO", manager.docker.spark.upload_data_to_minio)
     set_status("Data uploaded to MinIO \u2713")
 
-    with console.status("[dim]Importing distances to Cassandra[/dim]", spinner="dots"):
-      result = manager.docker.db.import_distances()
+    result = run_step(console, "Importing distances to Cassandra", manager.docker.db.import_distances)
     if result is None:
       logging.error("Fallo en import_distances. Abortando.")
       return
     set_status("Distances imported \u2713")
 
-    with console.status("[dim]Creating Kafka topics[/dim]", spinner="dots"):
-      result = manager.docker.kafka.create_topic(os.getenv('KAFKA_TOPIC', 'flight-delay-ml-request'))
-      if result is not None:
-        result = manager.docker.kafka.create_topic(os.getenv('KAFKA_RESPONSE_TOPIC', 'flight-delay-ml-response'))
-      if result is not None:
-        result = manager.docker.kafka.create_topic(os.getenv('KAFKA_STATUS_TOPIC', 'flight-delay-ml-status'))
+    def _create_topics():
+      r = manager.docker.kafka.create_topic(os.getenv('KAFKA_TOPIC', 'flight-delay-ml-request'))
+      if r is not None:
+        r = manager.docker.kafka.create_topic(os.getenv('KAFKA_RESPONSE_TOPIC', 'flight-delay-ml-response'))
+      if r is not None:
+        r = manager.docker.kafka.create_topic(os.getenv('KAFKA_STATUS_TOPIC', 'flight-delay-ml-status'))
+      return r
+    result = run_step(console, "Creating Kafka topics", _create_topics)
     if result is None:
       logging.error("Fallo en create_topic. Abortando.")
       return
     set_status("Kafka topics created \u2713")
 
-    with console.status("[dim]Starting Spark streaming job[/dim]", spinner="dots"):
-      result = manager.docker.spark.predict_delay()
+    result = run_step(console, "Starting Spark streaming job", manager.docker.spark.predict_delay)
     if result is None:
       logging.error("Fallo en predict_delay. Abortando.")
       return
@@ -496,10 +518,9 @@ def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
   except KeyboardInterrupt:
     set_status("Shutting down cluster...")
   finally:
-    with console.status("[dim]Stopping containers[/dim]", spinner="dots"):
-      manager._run_command(
-        'docker compose --profile db_mongo --profile db_cassandra down',
-        cwd=manager.project_home)
+    run_step(console, "Stopping containers", manager._run_command,
+      'docker compose --profile db_mongo --profile db_cassandra down',
+      cwd=manager.project_home)
     _status_line = ""
     set_status("Containers stopped. Goodbye!")
 
@@ -511,41 +532,27 @@ def main_docker_gcloud(db):
   vm_running = False
 
   try:
-    with console.status("[dim]Checking VM...[/dim]", spinner="dots"):
-      exists = orch.vm_exists()
+    exists = run_step(console, "Checking VM", orch.vm_exists)
     if not exists:
-      with console.status("[dim]Creating VM...[/dim]", spinner="dots"):
-        orch.create_vm()
-      with console.status("[dim]Waiting for SSH...[/dim]", spinner="dots"):
-        orch.wait_for_vm(timeout=180)
+      run_step(console, "Creating VM", orch.create_vm)
+      run_step(console, "Waiting for SSH", lambda: orch.wait_for_vm(timeout=180))
     else:
-      with console.status("[dim]Starting VM...[/dim]", spinner="dots"):
-        orch.start_vm()
-      with console.status("[dim]Waiting for SSH...[/dim]", spinner="dots"):
-        orch.wait_for_vm(timeout=120)
+      run_step(console, "Starting VM", orch.start_vm)
+      run_step(console, "Waiting for SSH", lambda: orch.wait_for_vm(timeout=120))
     vm_running = True
 
-    with console.status("[dim]Deploying code from GitHub...[/dim]", spinner="dots"):
-      orch.deploy_code()
-    with console.status("[dim]Configuring .env...[/dim]", spinner="dots"):
-      orch.deploy_env()
-    with console.status("[dim]Pulling Docker images...[/dim]", spinner="dots"):
-      orch.deploy_down()
-      orch.deploy_pull()
-    with console.status("[dim]Building Spark image (may take 5-10 min)...[/dim]", spinner="dots"):
-      orch.deploy_build()
-    with console.status("[dim]Starting containers...[/dim]", spinner="dots"):
-      orch.deploy_up()
-    with console.status("[dim]Running setup pipeline...[/dim]", spinner="dots"):
-      orch.run_pipeline()
-    with console.status("[dim]Starting prediction job...[/dim]", spinner="dots"):
-      orch.start_prediction()
+    run_step(console, "Deploying code from GitHub", orch.deploy_code)
+    run_step(console, "Configuring .env", orch.deploy_env)
+    run_step(console, "Pulling Docker images", lambda: [orch.deploy_down(), orch.deploy_pull()])
+    run_step(console, "Building Spark image (may take 5-10 min)", orch.deploy_build)
+    run_step(console, "Starting containers", orch.deploy_up)
+    run_step(console, "Running setup pipeline", orch.run_pipeline)
+    run_step(console, "Starting prediction job", orch.start_prediction)
 
     orch.suggest_tunnel()
-    with console.status("[dim]Configuring IAP tunnel...[/dim]", spinner="dots"):
-      orch.ensure_iap()
+    run_step(console, "Configuring IAP tunnel", orch.ensure_iap)
     console.print("[yellow]Opening IAP tunnels (Ctrl+C to stop and shut down VM)...[/yellow]")
-    orch.tunnel()
+    run_step(console, "IAP tunnel running", orch.tunnel)
   except KeyboardInterrupt:
     console.print("[yellow]Interrupted. Shutting down...[/yellow]")
   except Exception as e:
@@ -553,18 +560,15 @@ def main_docker_gcloud(db):
     logging.error("GCloud deploy failed", exc_info=True)
   finally:
     if vm_running:
-      with console.status("[dim]Stopping VM...[/dim]", spinner="dots"):
-        orch.stop_vm()
+      run_step(console, "Stopping VM", orch.stop_vm)
 
 def main_kubernetes_gke(db):
   """Deploy to GKE cluster"""
   from cloud.gcp_orchestrator import GCPOrchestrator
   os.environ['DB_MODE'] = db
   orch = GCPOrchestrator(mode="gke")
-  with console.status("[dim]Creating GKE cluster...[/dim]", spinner="dots"):
-    orch.create_gke_cluster()
-  with console.status("[dim]Deploying K8s manifests...[/dim]", spinner="dots"):
-    orch.deploy_k8s()
+  run_step(console, "Creating GKE cluster", orch.create_gke_cluster)
+  run_step(console, "Deploying K8s manifests", orch.deploy_k8s)
   orch.suggest_tunnel()
 
 if __name__ == '__main__':
