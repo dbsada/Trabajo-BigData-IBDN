@@ -530,6 +530,7 @@ def main_docker_gcloud(db):
   os.environ['DB_MODE'] = db
   orch = GCPOrchestrator(mode="gcloud", db=db)
   vm_running = False
+  project_home = os.getenv('PROJECT_HOME', os.path.expanduser('~/ibdn'))
 
   try:
     exists = run_step(console, "Checking VM", orch.vm_exists)
@@ -543,6 +544,10 @@ def main_docker_gcloud(db):
 
     run_step(console, "Deploying code from GitHub", orch.deploy_code)
     run_step(console, "Configuring .env", orch.deploy_env)
+    run_step(console, "Building prediction JAR", lambda: subprocess.run(
+      "sbt package", shell=True, cwd=os.path.join(project_home, "flight_prediction"), capture_output=True).check_returncode())
+    run_step(console, "Deploying JAR to VM", lambda: orch.deploy_jar(
+      os.path.join(project_home, "flight_prediction/target/scala-2.13/flight_prediction_2.13-0.1.jar")))
     run_step(console, "Pulling Docker images", lambda: [orch.deploy_down(), orch.deploy_pull()])
     run_step(console, "Building Spark image (may take ~30 min)", orch.deploy_build)
     run_step(console, "Starting containers", orch.deploy_up)

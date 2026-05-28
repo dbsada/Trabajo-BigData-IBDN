@@ -299,7 +299,7 @@ def api_train_model():
                 name_flag = " --run-name " + run_name + " " if run_name else " "
                 prediction_jar = os.getenv("PREDICTION_JAR",
                     "/app/flight_prediction/target/scala-2.13/flight_prediction_2.13-0.1.jar")
-                container.exec_run(
+                log_resp = container.exec_run(
                     "spark-submit --master spark://spark:7077 "
                     "--deploy-mode cluster "
                     "--conf spark.cores.max=2 "
@@ -322,6 +322,8 @@ def api_train_model():
                     },
                     detach=False,
                 )
+                if log_resp[0] != 0:
+                    print(f"Training FAILED (exit {log_resp[0]}):\n{log_resp[1].decode('utf-8', errors='replace')[:2000]}")
             except Exception as e:
                 print(f"Training error: {e}")
             finally:
@@ -333,6 +335,8 @@ def api_train_model():
         t.start()
         return json_util.dumps({"status": "started", "last_run_id": last_run_id})
     except Exception as e:
+        api_train_model._training = False
+        print(f"Training setup error: {e}")
         return json_util.dumps({"error": str(e)}), 500
 
 _last_training = {"running": False, "elapsed": 0, "ts": 0}

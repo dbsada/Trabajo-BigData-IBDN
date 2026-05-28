@@ -144,6 +144,15 @@ class GCPOrchestrator:
     def deploy_down(self):
         self._ssh(f"cd {self.repo} && docker compose --profile db_{self.db} down 2>/dev/null; true")
 
+    def deploy_jar(self, local_jar):
+        self._ssh(f"mkdir -p {self.repo}/flight_prediction/target/scala-2.13", check=False)
+        r = subprocess.run(
+            self._base + ["scp", local_jar, f"{self.user}@{self.instance}:{self.repo}/flight_prediction/target/scala-2.13/",
+                          "--zone", self.zone, "--quiet"],
+            capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"SCP JAR failed: {r.stderr.strip()}")
+
     def run_pipeline(self):
         env = f"DB_MODE={self.db}"
         commands = [
