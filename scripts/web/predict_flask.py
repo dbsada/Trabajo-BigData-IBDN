@@ -79,21 +79,11 @@ def api_models():
         resp = requests.post(f"{MLFLOW_TRACKING_URI}/api/2.0/mlflow/runs/search",
             json={"experiment_ids": ["0"], "order_by": ["start_time desc"]}, timeout=5)
         runs_data = resp.json().get("runs", [])
-        runs_data = [r for r in runs_data if r.get("info", {}).get("lifecycle_stage", "active") != "deleted"
-            and r.get("info", {}).get("run_name") != "Original"]
+        runs_data = [r for r in runs_data if r.get("info", {}).get("lifecycle_stage", "active") != "deleted"]
     except Exception:
         runs_data = []
 
     model_list = []
-    model_list.append({
-        "run_id": "builtin",
-        "run_name": "Original",
-        "status": "READY",
-        "start_time": 0,
-        "params": {"maxBins": "4657", "maxMemoryInMB": "1024", "numTrees": "20", "maxDepth": "10"},
-        "metrics": {"accuracy": 0.588},
-        "builtin": True,
-    })
     for run in runs_data:
         info = run["info"]
         data = run["data"]
@@ -119,7 +109,7 @@ def api_models():
         marker = s3.get_object(Bucket="lakehouse", Key="models/active_run_id.txt")
         active_run_id = marker["Body"].read().decode().strip()
     except Exception:
-        active_run_id = "builtin"
+        active_run_id = None
 
     return json_util.dumps({"models": model_list, "active_run_id": active_run_id})
 
@@ -137,43 +127,13 @@ def api_activate_model(run_id):
 
         dst_prefix = "models/spark_random_forest_classifier.flight_delays.5.0.bin/"
 
-        if run_id == "builtin":
-            import requests as req
-            # Find the MLflow run named "Original"
-            resp = req.post(f"{MLFLOW_TRACKING_URI}/api/2.0/mlflow/runs/search",
-                json={"experiment_ids": ["0"], "order_by": ["start_time desc"],
-                      "filter": "tags.mlflow.runName = 'Original'"}, timeout=5)
-            runs = resp.json().get("runs", [])
-            if not runs:
-                return json_util.dumps({"error": "Original model not found in MLflow. Run: docker exec spark spark-submit scripts/register_original.py"}), 404
-            original_run_id = runs[0]["info"]["run_id"]
-            src_prefix = f"mlflow/0/{original_run_id}/artifacts/model/"
-            stages = s3.list_objects_v2(Bucket="lakehouse", Prefix=f"{src_prefix}sparkml/stages/", Delimiter="/")
-            stage_prefix = None
-            for p in stages.get("CommonPrefixes", []):
-                stage_prefix = p["Prefix"]
-                break
-            if not stage_prefix:
-                return json_util.dumps({"error": "Original model files not found in MLflow"}), 404
-            existing = s3.list_objects_v2(Bucket="lakehouse", Prefix=dst_prefix)
-            for obj in existing.get("Contents", []):
-                s3.delete_object(Bucket="lakehouse", Key=obj["Key"])
-            objects = s3.list_objects_v2(Bucket="lakehouse", Prefix=stage_prefix)
-            for obj in objects.get("Contents", []):
-                rel_path = obj["Key"][len(stage_prefix):]
-                s3.copy_object(Bucket="lakehouse",
-                    CopySource={"Bucket": "lakehouse", "Key": obj["Key"]},
-                    Key=f"{dst_prefix}{rel_path}")
-        else:
-            src_prefix = f"mlflow/0/{run_id}/artifacts/model/"
-            stages = s3.list_objects_v2(Bucket="lakehouse", Prefix=f"{src_prefix}sparkml/stages/", Delimiter="/")
-            stage_prefix = None
-            for p in stages.get("CommonPrefixes", []):
-                stage_prefix = p["Prefix"]
-                break
-            if not stage_prefix:
-                return json_util.dumps({"error": "No model stages found"}), 400
-
+        src_prefix = f"mlflow/0/{run_id}/artifacts/model/"
+        stages = s3.list_objects_v2(Bucket="lakehouse", Prefix=f"{src_prefix}sparkml/stages/", Delimiter="/")
+        stage_prefix = None
+        for p in stages.get("CommonPrefixes", []):
+            stage_prefix = p["Prefix"]
+            break
+        if stage_prefix:
             existing = s3.list_objects_v2(Bucket="lakehouse", Prefix=dst_prefix)
             for obj in existing.get("Contents", []):
                 s3.delete_object(Bucket="lakehouse", Key=obj["Key"])
@@ -186,58 +146,109 @@ def api_activate_model(run_id):
                     Key=f"{dst_prefix}{rel_path}")
 
         s3.put_object(Bucket="lakehouse", Key="models/active_run_id.txt", Body=run_id.encode())
+        _restart_prediction_job()
         return json_util.dumps({"ok": True, "active_run_id": run_id})
     except Exception as e:
         return json_util.dumps({"error": str(e)}), 500
 
 def _restart_prediction_job():
-    import docker, requests as req, threading
+    import docker, requests as req, threading, time
+
+    # Get old app IDs before killing
+    old_ids = set()
     try:
-        # Kill existing prediction apps
         r = req.get("http://spark:8080/json/", timeout=3)
-        data = r.json()
-        for app in data.get("activeapps", []):
+        for app in r.json().get("activeapps", []):
             if "FlightDelayPrediction" in app.get("name", ""):
-                req.post("http://spark:8080/app/kill/", data={"id": app.get("id",""), "terminate": "true"}, timeout=3)
+                old_ids.add(app.get("id", ""))
+    except Exception:
+        pass
 
-        # Wait a moment then resubmit
-        def _submit():
-            import time
-            time.sleep(5)
-            client = docker.from_env()
-            access_key = os.getenv("MINIO_ROOT_USER", "admin")
-            secret_key = os.getenv("MINIO_ROOT_PASSWORD", "password")
-            prediction_jar = os.getenv("PREDICTION_JAR",
-                "/app/flight_prediction/target/scala-2.13/flight_prediction_2.13-0.1.jar")
-            cmd = (
-                f"spark-submit --master spark://spark:7077 "
-                f"--deploy-mode cluster --conf spark.cores.max=2 "
-                f"--conf spark.hadoop.fs.s3a.access.key={access_key} "
-                f"--conf spark.hadoop.fs.s3a.secret.key={secret_key} "
-                f"--conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem "
-                f"--conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 "
-                f"--conf spark.hadoop.fs.s3a.path.style.access=true "
-                f"--conf spark.hadoop.fs.s3a.connection.ssl.enabled=false "
-                f"--class es.upm.dit.ging.predictor.MakePrediction "
-                f"{prediction_jar}"
-            )
-            container = client.containers.get("spark")
-            container.exec_run(cmd, environment={"MLFLOW_TRACKING_URI": os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")}, detach=True)
-
-        threading.Thread(target=_submit, daemon=True).start()
+    # Submit new prediction job first (without killing old one)
+    try:
+        access_key = os.getenv("MINIO_ROOT_USER", "admin")
+        secret_key = os.getenv("MINIO_ROOT_PASSWORD", "password")
+        prediction_jar = os.getenv("PREDICTION_JAR",
+            "/app/flight_prediction/target/scala-2.13/flight_prediction_2.13-0.1.jar")
+        cmd = (
+            f"spark-submit --master spark://spark:7077 "
+            f"--deploy-mode cluster --conf spark.cores.max=2 "
+            f"--conf spark.hadoop.fs.s3a.access.key={access_key} "
+            f"--conf spark.hadoop.fs.s3a.secret.key={secret_key} "
+            f"--conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem "
+            f"--conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 "
+            f"--conf spark.hadoop.fs.s3a.path.style.access=true "
+            f"--conf spark.hadoop.fs.s3a.connection.ssl.enabled=false "
+            f"--class es.upm.dit.ging.predictor.MakePrediction "
+            f"{prediction_jar}"
+        )
+        client = docker.from_env()
+        container = client.containers.get("spark")
+        container.exec_run(cmd, environment={"MLFLOW_TRACKING_URI": os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")}, detach=True)
     except Exception as e:
-        print(f"Restart prediction error: {e}")
+        print(f"Submit prediction error: {e}")
+        return
+
+    # Wait for new app to appear (up to 20s), then kill old apps
+    def _wait_and_kill():
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            time.sleep(2)
+            try:
+                r = req.get("http://spark:8080/json/", timeout=3)
+                for app in r.json().get("activeapps", []):
+                    if "FlightDelayPrediction" in app.get("name", "") and app.get("id", "") not in old_ids:
+                        for oid in old_ids:
+                            try:
+                                req.post("http://spark:8080/app/kill/", data={"id": oid, "terminate": "true"}, timeout=3)
+                            except Exception:
+                                pass
+                        return
+            except Exception:
+                pass
+        # Timeout — kill old anyway
+        for oid in old_ids:
+            try:
+                req.post("http://spark:8080/app/kill/", data={"id": oid, "terminate": "true"}, timeout=3)
+            except Exception:
+                pass
+
+    threading.Thread(target=_wait_and_kill, daemon=True).start()
 
 @app.route("/api/prediction/restart", methods=["POST"])
 def api_restart_prediction():
     _restart_prediction_job()
-    return json_util.dumps({"ok": True})
+
+@app.route("/api/prediction/status")
+def api_prediction_status():
+    import requests as req
+    try:
+        r = req.get("http://spark:8080/json/", timeout=3)
+        for app in r.json().get("activeapps", []):
+            if "FlightDelayPrediction" in app.get("name", ""):
+                return json_util.dumps({"running": True})
+    except Exception:
+        pass
+    return json_util.dumps({"running": False})
+
+_train_lock = threading.Lock()
 
 @app.route("/api/models/train", methods=["POST"])
 def api_train_model():
-    import threading, docker
-    if getattr(api_train_model, "_training", False):
-        return json_util.dumps({"status": "already_running"}), 200
+    import threading, docker, requests as req
+
+    with _train_lock:
+        if getattr(api_train_model, "_training", False):
+            try:
+                r = req.get("http://spark:8080/json/", timeout=3)
+                has_app = any("train_spark_mllib_model" in a.get("name", "")
+                              for a in r.json().get("activeapps", []))
+            except Exception:
+                has_app = False
+            if not has_app:
+                api_train_model._training = False
+            else:
+                return json_util.dumps({"status": "already_running"}), 200
 
     # Read hyperparameters from request
     data = request.get_json(silent=True) or {}
@@ -245,11 +256,19 @@ def api_train_model():
     max_memory_mb = data.get("max_memory_mb", 1024)
     num_trees = data.get("num_trees", 20)
     max_depth = data.get("max_depth", 10)
+    run_name = data.get("run_name", "").strip() or None
+
+    if max_bins < 4200:
+        return json_util.dumps({"error": f"maxBins ({max_bins}) too low. Dataset needs at least 4200. Slider range is 4200-10000."}), 400
 
     try:
         client = docker.from_env()
+        import time as _t
 
-        api_train_model._training = True
+        with _train_lock:
+            api_train_model._training = True
+        _last_training["running"] = False
+        _last_training["ts"] = _t.time()
 
         # Kill any stale training apps or resource-hogging apps on Spark
         try:
@@ -277,16 +296,27 @@ def api_train_model():
         def _train():
             try:
                 container = client.containers.get("spark")
+                name_flag = " --run-name " + run_name + " " if run_name else " "
+                prediction_jar = os.getenv("PREDICTION_JAR",
+                    "/app/flight_prediction/target/scala-2.13/flight_prediction_2.13-0.1.jar")
                 container.exec_run(
                     "spark-submit --master spark://spark:7077 "
-                    "--conf spark.cores.max=1 "
+                    "--deploy-mode cluster "
+                    "--conf spark.cores.max=2 "
+                    "--conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 "
                     "--conf spark.hadoop.fs.s3a.access.key=" + os.getenv("MINIO_ROOT_USER", "admin") + " "
                     "--conf spark.hadoop.fs.s3a.secret.key=" + os.getenv("MINIO_ROOT_PASSWORD", "password") + " "
-                    "scripts/train.py "
+                    "--conf spark.hadoop.fs.s3a.path.style.access=true "
+                    "--conf spark.hadoop.fs.s3a.connection.ssl.enabled=false "
+                    "--conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem "
+                    "--conf spark.driver.extraJavaOptions=--add-opens=java.base/sun.util.calendar=ALL-UNNAMED "
+                    "--class es.upm.dit.ging.predictor.TrainModel "
+                    + prediction_jar + " "
                     "--max-bins " + str(max_bins) + " "
                     "--max-memory-mb " + str(max_memory_mb) + " "
                     "--num-trees " + str(num_trees) + " "
-                    "--max-depth " + str(max_depth) + " ",
+                    "--max-depth " + str(max_depth) + " "
+                    + name_flag,
                     environment={
                         "MLFLOW_TRACKING_URI": os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000"),
                     },
@@ -305,19 +335,29 @@ def api_train_model():
     except Exception as e:
         return json_util.dumps({"error": str(e)}), 500
 
+_last_training = {"running": False, "elapsed": 0, "ts": 0}
+
 @app.route("/api/models/train/status")
 def api_train_status():
-    import requests as req
+    import requests as req, time as _time
+    now = _time.time()
     try:
-        r = req.get("http://spark:8080/json/", timeout=3)
+        r = req.get("http://spark:8080/json/", timeout=5)
         data = r.json()
         for app in data.get("activeapps", []):
             if "train_spark_mllib_model" in app.get("name", ""):
-                return json_util.dumps({"status": "running", "elapsed": app["duration"] // 1000})
+                _last_training["running"] = True
+                _last_training["elapsed"] = app["duration"] // 1000
+                _last_training["ts"] = now
+                return json_util.dumps({"status": "running", "elapsed": _last_training["elapsed"]})
+        _last_training["running"] = False
+        return json_util.dumps({"status": "idle"})
     except Exception:
-        pass
-    if getattr(api_train_model, "_training", False):
-        return json_util.dumps({"status": "running", "elapsed": 0})
+        if getattr(api_train_model, "_training", False) and now - _last_training.get("ts", 0) < 60:
+            return json_util.dumps({"status": "running", "elapsed": _last_training["elapsed"]})
+        if now - _last_training.get("ts", 0) < 30 and _last_training.get("running"):
+            return json_util.dumps({"status": "running", "elapsed": _last_training["elapsed"]})
+    _last_training["running"] = False
     return json_util.dumps({"status": "idle"})
 
 @app.route("/api/models/train/cancel", methods=["POST"])
@@ -948,13 +988,16 @@ def classify_flight_delays_realtime():
     future.add_callback(
       lambda x: socketio.emit('kafka_ack', {'id': unique_id}, room=unique_id)
     )
+    future.add_errback(
+      lambda x: print(f"Kafka send failed: {x}")
+    )
     p.flush(timeout=10)
     print(f"Prediction sent: {unique_id[:12]} to {PREDICTION_TOPIC}")
   except Exception as e:
     print(f"Kafka send error: {e}")
+    return json_util.dumps({"status": "ERROR", "error": f"Kafka send failed: {e}"}), 503
 
-  response = {"status": "OK", "id": unique_id}
-  return json_util.dumps(response)
+  return json_util.dumps({"status": "OK", "id": unique_id})
 
 @app.route("/flights/delays/predict_kafka")
 def flight_delays_page_kafka():
@@ -973,19 +1016,35 @@ def flight_delays_page_kafka():
 @app.route("/flights/delays/predict/classify_realtime/response/<unique_id>")
 def classify_flight_delays_realtime_response(unique_id):
   """Serves predictions to polling requestors"""
-  
-  prediction = db.flight_delay_ml_response.find_one(
-    {
-      "UUID": unique_id
-    }
-  )
-  
-  response = {"status": "WAIT", "id": unique_id}
-  if prediction:
-    response["status"] = "OK"
-    response["prediction"] = prediction
-  
-  return json_util.dumps(response)
+  db_mode = os.getenv('DB_MODE', 'cassandra')
+
+  if db_mode == 'cassandra':
+    session = predict_utils.get_cassandra_session()
+    if session:
+      row = session.execute(
+        "SELECT * FROM flight_delay_ml_response WHERE uuid=%s",
+        (unique_id,)
+      ).one()
+      if row:
+        return json_util.dumps({
+          "status": "OK", "id": unique_id,
+          "prediction": {
+            "UUID": row.uuid, "Prediction": row.prediction,
+            "Origin": row.origin, "Dest": row.dest,
+            "DepDelay": row.dep_delay, "Carrier": row.carrier,
+            "FlightDate": row.flight_date, "FlightNum": row.flight_num,
+            "Distance": row.distance, "Route": row.route,
+            "DayOfYear": row.day_of_year, "DayOfMonth": row.day_of_month,
+            "DayOfWeek": row.day_of_week, "Timestamp": str(row.timestamp),
+          }
+        })
+
+  else:
+    prediction = db.flight_delay_ml_response.find_one({"UUID": unique_id})
+    if prediction:
+      return json_util.dumps({"status": "OK", "id": unique_id, "prediction": prediction})
+
+  return json_util.dumps({"status": "WAIT", "id": unique_id})
 
 def shutdown_server():
   func = request.environ.get('werkzeug.server.shutdown')
@@ -1040,7 +1099,7 @@ def models_page():
     marker = s3.get_object(Bucket="lakehouse", Key="models/active_run_id.txt")
     active_run_id = marker["Body"].read().decode().strip()
   except Exception:
-    active_run_id = "builtin"
+    active_run_id = None
 
   return render_template("models.html",
     models=model_list,

@@ -33,12 +33,9 @@ def get_flight_distance(client, origin, dest):
       ).one()
       if row:
         return row.distance
-      return None
-  
-  record = client.agile_data_science.origin_dest_distances.find_one({
-    "Origin": origin,
-    "Dest": dest,
-  })
+    return None
+
+  record = client.agile_data_science.origin_dest_distances.find_one({"Origin": origin, "Dest": dest})
   return record["Distance"]
 
 def get_regression_date_args(iso_date):

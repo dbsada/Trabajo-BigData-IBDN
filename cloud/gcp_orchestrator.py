@@ -1,4 +1,12 @@
-import os, time, subprocess
+import os, time, subprocess, logging
+from rich.console import Console
+from rich.panel import Panel
+
+_log_console = Console()
+
+def log(msg):
+    logging.info(msg)
+    _log_console.print(f"[dim]{msg}[/dim]")
 
 class GCPOrchestrator:
     def __init__(self, mode="gcloud", db="cassandra"):
@@ -9,6 +17,8 @@ class GCPOrchestrator:
         self.instance = os.getenv("GCP_INSTANCE", "bigdata-vm")
         self.user = os.getenv("GCP_USER", "ubuntu")
         self.repo = os.getenv("REMOTE_REPO", os.getcwd())
+        self.access_key = os.getenv("MINIO_ROOT_USER", "admin")
+        self.secret_key = os.getenv("MINIO_ROOT_PASSWORD", "password")
         self._base = ["gcloud", "compute", "--project", self.project]
 
     def _detect_project(self):
@@ -93,7 +103,7 @@ class GCPOrchestrator:
     def register_original_model(self):
         cmd = (
             f"cd {self.repo} && docker exec spark spark-submit --master spark://spark:7077 "
-            f"--conf spark.hadoop.fs.s3a.access.key=admin --conf spark.hadoop.fs.s3a.secret.key=password "
+            f"--conf spark.hadoop.fs.s3a.access.key={self.access_key} --conf spark.hadoop.fs.s3a.secret.key={self.secret_key} "
             f"scripts/register_original.py"
         )
         self._ssh(cmd, check=False)
@@ -102,7 +112,7 @@ class GCPOrchestrator:
         cmd = (
             f"cd {self.repo} && docker exec -d spark spark-submit --master spark://spark:7077 "
             f"--deploy-mode cluster --conf spark.cores.max=2 "
-            f"--conf spark.hadoop.fs.s3a.access.key=admin --conf spark.hadoop.fs.s3a.secret.key=password "
+            f"--conf spark.hadoop.fs.s3a.access.key={self.access_key} --conf spark.hadoop.fs.s3a.secret.key={self.secret_key} "
             f"--conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem "
             f"--conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 "
             f"--conf spark.hadoop.fs.s3a.path.style.access=true "
@@ -127,11 +137,11 @@ class GCPOrchestrator:
 
     @staticmethod
     def suggest_tunnel():
-        print()
-        print("=" * 60)
-        print("  Deployment complete!")
-        print("  Use `gcloud compute ssh ... -- -L 5001:localhost:5001 -L 5002:localhost:5002 -N` to access")
-        print("=" * 60)
+        _log_console.print()
+        _log_console.print(Panel(
+            "  [bold]Deployment complete![/bold]\n  [dim]Use `gcloud compute ssh ... -- -L 5001:localhost:5001 -L 5002:localhost:5002 -N` to access[/dim]",
+            border_style="green", expand=False
+        ))
 
     # ---- K8S (GKE) ----
 

@@ -1,7 +1,7 @@
 import os
 import subprocess
-import json
 import logging
+from textwrap import dedent
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
@@ -39,66 +39,60 @@ def import_to_mongodb(project_home, src_file):
 def import_to_cassandra(project_home, src_file):
     keyspace = os.getenv('MONGODB_DATABASE', 'agile_data_science')
     table = os.getenv('MONGODB_DISTANCES_COLLECTION', 'origin_dest_distances')
-    cassandra_host = os.getenv('CASSANDRA_CONTAINER', 'localhost')
-    cassandra_port = int(os.getenv('CASSANDRA_PORT', '9042'))
+    cassandra_host = os.getenv('CASSANDRA_CONTAINER', 'cassandra')
 
     if not os.path.exists(src_file):
         logging.error(f"❌ No se encuentra el archivo de datos: {src_file}")
         return
 
-    logging.info("📊 Iniciando importación a Cassandra...")
+    logging.info("📊 Iniciando importación a Cassandra via Docker exec...")
 
+    # 1. Crear keyspace via cqlsh (evita cassandra-driver local)
+    r = subprocess.run(
+        ['docker', 'exec', 'cassandra', 'cqlsh', '-e',
+         f"CREATE KEYSPACE IF NOT EXISTS {keyspace} "
+         f"WITH replication = {{'class': 'SimpleStrategy', 'replication_factor': 1}}"],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        logging.error(f"Error creando keyspace: {r.stderr.strip()}")
+        return
+
+    # 2. Crear tabla e importar datos con Python dentro del contenedor flask
+    #    (el contenedor flask tiene cassandra-driver instalado)
+    script = dedent(f"""\
+    import json, sys
     from cassandra.cluster import Cluster
-    from cassandra.cluster import NoHostAvailable
-    import time
-
-    session = None
-    for attempt in range(10):
-        try:
-            cluster = Cluster([cassandra_host], port=cassandra_port)
-            session = cluster.connect()
-            break
-        except NoHostAvailable:
-            if attempt < 9:
-                logging.info(f"⏳ Esperando a Cassandra (intento {attempt + 1}/10)...")
-                time.sleep(5)
-            else:
-                raise
-
-    session.execute(f"""
-        CREATE KEYSPACE IF NOT EXISTS {keyspace}
-        WITH replication = {{'class': 'SimpleStrategy', 'replication_factor': 1}}
-    """)
-    session.set_keyspace(keyspace)
-
-    session.execute(f"""
-        CREATE TABLE IF NOT EXISTS {table} (
-            origin text,
-            dest text,
-            distance double,
-            PRIMARY KEY (origin, dest)
-        )
-    """)
-
-    session.execute(f"TRUNCATE {table}")
-
+    cluster = Cluster(['{cassandra_host}'], port=9042)
+    session = cluster.connect()
+    session.set_keyspace('{keyspace}')
+    session.execute('CREATE TABLE IF NOT EXISTS {table} (origin text, dest text, distance double, PRIMARY KEY (origin, dest))')
+    session.execute('TRUNCATE {table}')
     inserted = 0
-    with open(src_file) as f:
-        for line in f:
-            row = json.loads(line)
-            session.execute(
-                f"INSERT INTO {table} (origin, dest, distance) VALUES (%s, %s, %s)",
-                (row['Origin'], row['Dest'], row['Distance'])
-            )
-            inserted += 1
-
+    for line in sys.stdin:
+        row = json.loads(line)
+        session.execute(
+            'INSERT INTO {table} (origin, dest, distance) VALUES (%(o)s, %(d)s, %(dist)s)',
+            {{'o': row['Origin'], 'd': row['Dest'], 'dist': row['Distance']}}
+        )
+        inserted += 1
     cluster.shutdown()
-    logging.info(f"✅ {inserted} registros importados a Cassandra.")
+    print(f'{{inserted}} registros importados a Cassandra.')
+    """)
+
+    with open(src_file) as f:
+        r = subprocess.run(
+            ['docker', 'exec', '-i', 'flask', 'python3', '-c', script],
+            stdin=f, capture_output=True, text=True)
+
+    if r.returncode == 0:
+        logging.info(f"✅ {r.stdout.strip()}")
+    else:
+        logging.error(f"Error importando datos: {r.stderr.strip()}")
 
 def main():
-    project_home = os.path.expanduser(os.getenv('PROJECT_HOME', '~/ibdn'))
+    project_home = os.path.expanduser(os.getenv('PROJECT_HOME', '/app'))
     src_file = os.path.join(project_home, os.getenv('DISTANCES_FILE', 'data/origin_dest_distances.jsonl'))
-    db_mode = os.getenv('DB_MODE', 'mongo')
+    db_mode = os.getenv('DB_MODE', 'cassandra')
 
     if db_mode == 'cassandra':
         import_to_cassandra(project_home, src_file)

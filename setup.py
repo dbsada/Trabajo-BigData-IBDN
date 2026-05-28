@@ -25,7 +25,7 @@ from rich.text import Text
 from rich.align import Align
 from rich import box
 import questionary
-from prompt_toolkit.shortcuts import CompleteStyle
+
 from typing import Literal
 import requests
 
@@ -155,6 +155,54 @@ class ClusterManager:
       _status_line = ""
       logging.info('🚀 Iniciando servicios con Docker Compose...')
       os.environ['DB_MODE'] = db
+
+      ports_to_check = [
+        ("Spark UI",      int(os.getenv('SPARK_MASTER_UI_PORT', '8080'))),
+        ("Spark Master",  int(os.getenv('SPARK_MASTER_PORT', '7077'))),
+        ("Flask",         int(os.getenv('FLASK_PORT', '5001'))),
+        ("MinIO API",     int(os.getenv('MINIO_API_PORT', '9000'))),
+        ("MinIO Console", int(os.getenv('MINIO_CONSOLE_PORT', '9001'))),
+        ("Kafka",         int(os.getenv('KAFKA_PORT', '9092'))),
+        ("MLflow",        int(os.getenv('MLFLOW_PORT', '5002'))),
+      ]
+      if db == 'mongo':
+        ports_to_check.append(("MongoDB", int(os.getenv('MONGODB_PORT', '27017'))))
+      else:
+        ports_to_check.append(("Cassandra", int(os.getenv('CASSANDRA_PORT', '9042'))))
+
+      busy = [(name, port) for name, port in ports_to_check if self.m._check_port(port)]
+      if busy:
+        msg = "[bold red]Puertos ocupados detectados:[/bold red]\n\n"
+        pids = set()
+        has_docker = False
+        for name, port in busy:
+          msg += f"  • {name} (puerto {port})"
+          lsof = subprocess.run(["lsof", "-i", f":{port}", "-sTCP:LISTEN"], capture_output=True, text=True, timeout=5)
+          lines = lsof.stdout.strip().splitlines()
+          if len(lines) > 1:
+            for line in lines[1:]:
+              parts = line.split()
+              if len(parts) >= 3:
+                is_docker = "docker" in parts[0].lower()
+                if is_docker:
+                  has_docker = True
+                  msg += f"\n    └ {parts[0]} (PID {parts[1]}) — {parts[2]} [dim](Docker Desktop)[/dim]"
+                else:
+                  msg += f"\n    └ {parts[0]} (PID {parts[1]}) — {parts[2]}"
+                  pids.add(parts[1])
+          msg += "\n"
+        if pids:
+          msg += f"\n[bold]Para liberarlos:[/bold]  kill -9 {' '.join(sorted(pids))}\n"
+        if has_docker:
+          msg += (
+            "\n[bold]Nota:[/bold] Docker Desktop tiene ocupados algunos puertos. Puedes:\n"
+            "  • Cambiar los puertos conflictivos en .env\n"
+            "  • Cerrar Docker Desktop desde la bandeja del sistema si no lo necesitas\n"
+          )
+        msg += "\nLibera los puertos o cambia la configuración en .env antes de continuar."
+        console.print(Panel(msg, title="[bold red]❌ Puerto(s) ocupado(s)[/bold red]", border_style="red", expand=False))
+        sys.exit(1)
+
       with console.status("[dim]Building Docker images (may take minutes)[/dim]", spinner="dots"):
           self.m._run_command(f'docker compose --profile db_{db} up -d --build', cwd=self.m.project_home)
 
@@ -251,19 +299,59 @@ class ClusterManager:
         self.container_name = os.getenv('SPARK_CONTAINER', 'spark')
         self.prediction_log = os.getenv('PREDICTION_LOG', 'logs/flight_prediction_2.13-0.1.jar.log')
 
+      def upload_to_minio(self, local_path, minio_key):
+        """Sube un archivo local a MinIO via mc pipe"""
+        if not os.path.exists(local_path):
+          logging.error(f"Archivo no encontrado: {local_path}")
+          return None
+        with open(local_path) as f:
+          r = subprocess.run(
+            ["docker", "exec", "-i", "minio", "mc", "pipe", f"local/{minio_key}"],
+            stdin=f, capture_output=True, text=True)
+        if r.returncode == 0:
+          logging.info(f"✅ Subido a MinIO: {minio_key}")
+        else:
+          logging.error(f"Error subiendo {minio_key}: {r.stderr.strip()}")
+        return r
+
+      def upload_data_to_minio(self):
+        """Sube todos los archivos descargados a MinIO"""
+        project_home = os.getenv('PROJECT_HOME', os.path.expanduser('~/ibdn'))
+        files = [
+          (f"{project_home}/data/simple_flight_delay_features.jsonl.bz2", "lakehouse/raw"),
+          (f"{project_home}/data/origin_dest_distances.jsonl", "lakehouse/raw"),
+          (f"{project_home}/models/sklearn_vectorizer.pkl", "lakehouse/models"),
+          (f"{project_home}/models/sklearn_regressor.pkl", "lakehouse/models"),
+        ]
+        for local_path, minio_prefix in files:
+          if os.path.exists(local_path):
+            key = f"{minio_prefix}/{os.path.basename(local_path)}"
+            self.upload_to_minio(local_path, key)
+        logging.info("✅ Archivos subidos a MinIO")
+
       def train_model(self):
         logging.info("🧠 Iniciando entrenamiento Spark MLlib...")
         spark_master = os.getenv('SPARK_MASTER_URL', 'spark://spark:7077')
         access_key = os.getenv('MINIO_ROOT_USER', 'admin')
         secret_key = os.getenv('MINIO_ROOT_PASSWORD', 'password')
+        minio_endpoint = os.getenv('MINIO_ENDPOINT', 'http://minio:9000')
+        prediction_jar = os.getenv('PREDICTION_JAR',
+          '/app/flight_prediction/target/scala-2.13/flight_prediction_2.13-0.1.jar')
         cmd = (
           f"docker exec {self.container_name} spark-submit "
           f"--master {spark_master} "
+          f"--deploy-mode cluster "
+          f"--conf spark.cores.max=2 "
           f"--conf spark.hadoop.fs.s3a.access.key={access_key} "
           f"--conf spark.hadoop.fs.s3a.secret.key={secret_key} "
-          f"scripts/train.py"
+          f"--conf spark.hadoop.fs.s3a.endpoint={minio_endpoint} "
+          f"--conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem "
+          f"--conf spark.hadoop.fs.s3a.path.style.access=true "
+          f"--conf spark.hadoop.fs.s3a.connection.ssl.enabled=false "
+          f"--conf spark.driver.extraJavaOptions=--add-opens=java.base/sun.util.calendar=ALL-UNNAMED "
+          f"--class es.upm.dit.ging.predictor.TrainModel "
+          f"{prediction_jar}"
         )
-        
         return self.m._run_command(cmd)
 
       def predict_delay(self):
@@ -279,12 +367,14 @@ class ClusterManager:
           f"docker exec {self.container_name} spark-submit "
           f"--master {spark_master} "
           f"--deploy-mode cluster "
+          f"--conf spark.cores.max=2 "
           f"--conf spark.hadoop.fs.s3a.endpoint={minio_endpoint} "
           f"--conf spark.hadoop.fs.s3a.access.key={access_key} "
           f"--conf spark.hadoop.fs.s3a.secret.key={secret_key} "
           f"--conf spark.hadoop.fs.s3a.path.style.access=true "
           f"--conf spark.hadoop.fs.s3a.connection.ssl.enabled=false "
           f"--conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem "
+          f"--class es.upm.dit.ging.predictor.MakePrediction "
           f"{prediction_jar}"
         )
         return self.m._run_command(cmd, wait=False)
@@ -318,6 +408,17 @@ class ClusterManager:
 def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
   manager = ClusterManager()
 
+  docker_check = subprocess.run('docker info', shell=True, capture_output=True)
+  if docker_check.returncode != 0:
+    console.print(Panel(
+      "[bold red]Docker no está encendido.[/bold red]\n\n"
+      "Por favor, abre Docker Desktop y espera a que esté listo antes de ejecutar setup.py",
+      title="[bold red]❌ Docker no disponible[/bold red]",
+      border_style="red",
+      expand=False
+    ))
+    sys.exit(1)
+
   with console.status("[dim]Cleaning previous sessions[/dim]", spinner="dots"):
     subprocess.run('docker compose --profile db_mongo --profile db_cassandra down 2>/dev/null',
       shell=True, cwd=manager.project_home, capture_output=True)
@@ -346,6 +447,10 @@ def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
       logging.error("Fallo en download_data.py. Abortando.")
       return
     set_status("Data downloaded \u2713")
+
+    with console.status("[dim]Uploading data to MinIO[/dim]", spinner="dots"):
+      manager.docker.spark.upload_data_to_minio()
+    set_status("Data uploaded to MinIO \u2713")
 
     with console.status("[dim]Importing distances to Cassandra[/dim]", spinner="dots"):
       result = manager.docker.db.import_distances()
@@ -379,57 +484,11 @@ def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
     
     set_status("")
 
-    rich.print("\n[bold]Cluster ready[/bold]  ·  [dim]Press Ctrl+C to shutdown[/dim]")
+    rich.print(f"\n[bold]Cluster ready[/bold]  ·  [dim]Press Ctrl+C to shutdown[/dim]")
     rich.print("[dim]" + "─" * (console.width-2) + "[/dim]")
 
     while True:
-      main_choice = questionary.select(
-        "ibdn@cluster",
-        choices=[ "📋 Menú de logs" ]
-      ).ask()
-
-      if main_choice is None:
-        break
-
-      if main_choice == "📋 Menú de logs":
-        db_label = "MongoDB" if db == 'mongo' else "Cassandra"
-        db_service = "mongodb" if db == 'mongo' else "cassandra"
-        log_services = [
-          "Kafka",
-          "Spark (Master)",
-          "Spark Worker",
-          "Predicción Spark MLlib",
-          db_label,
-          "Flask",
-          "MinIO",
-          "← Volver",
-        ]
-        rich.print(f"\n   [dim]Servicios: Kafka / Spark (Master) / Spark Worker /\n"
-                   f"   Predicción MLlib / {db_label} / Flask / MinIO[/dim]")
-        while True:
-          log_choice = questionary.autocomplete(
-            "📋 Filtrar:",
-            choices=log_services,
-            complete_style=CompleteStyle.READLINE_LIKE
-          ).ask()
-
-          if log_choice is None or log_choice == "← Volver":
-            break
-
-          if log_choice == "Kafka":
-            manager.docker.show_service_logs("kafka")
-          elif log_choice == "Spark (Master)":
-            manager.docker.show_service_logs("spark")
-          elif log_choice == "Spark Worker":
-            manager.docker.show_service_logs("spark-worker")
-          elif log_choice == "Predicción Spark MLlib":
-            manager.docker.spark.show_prediction_logs()
-          elif log_choice == db_label:
-            manager.docker.show_service_logs(db_service)
-          elif log_choice == "Flask":
-            manager.docker.show_service_logs("flask")
-          elif log_choice == "MinIO":
-            manager.docker.show_service_logs("minio")
+      time.sleep(1)
 
   except KeyboardInterrupt:
     set_status("Shutting down cluster...")
@@ -513,11 +572,21 @@ if __name__ == '__main__':
       "¿Qué infraestructura deseas usar?",
       choices=[
           "Docker",
-          "Docker (GCloud)",
-          "K8S (GKE)"
+          "Deploy in GCloud"
       ],
       default="Docker"
   ).ask()
+
+  gcloud_mode = None
+  if infra == "Deploy in GCloud":
+    gcloud_mode = questionary.select(
+        "Modo en GCloud:",
+        choices=[
+            "Docker",
+            "Kubernetes"
+        ],
+        default="Docker"
+    ).ask()
 
   db_choice = questionary.select(
       "¿Qué base de datos quieres levantar?",
@@ -528,11 +597,12 @@ if __name__ == '__main__':
       default="Cassandra"
   ).ask()
 
-  # Clear 2 lines of questions from terminal
-  sys.stdout.write("\033[1A\033[2K\033[1A\033[2K")
+  # Clear lines from terminal
+  n_clear = 3 if gcloud_mode else 2
+  sys.stdout.write("\033[1A\033[2K" * n_clear)
   sys.stdout.flush()
 
-  infra_mode = "docker" if "Docker" in infra and "GCloud" not in infra else "gcloud" if "GCloud" in infra else "gke"
+  infra_mode = "gke" if gcloud_mode == "Kubernetes" else "gcloud" if gcloud_mode == "Docker" else "docker"
   db = "mongo" if "MongoDB" in db_choice else "cassandra"
   db_label = "MongoDB" if db == 'mongo' else "Cassandra"
 
@@ -541,7 +611,7 @@ if __name__ == '__main__':
   elif infra_mode == "gcloud":
     infra_label = "Docker (GCloud)"
   else:
-    infra_label = "K8S (GKE)"
+    infra_label = "Kubernetes (GKE)"
 
   console.print(Align.center(Text.assemble(
       ("⚙️ ", "bold yellow"),

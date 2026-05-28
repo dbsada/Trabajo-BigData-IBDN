@@ -40,7 +40,7 @@ services:
       dockerfile: docker/dockerfile.spark
     container_name: spark
     ports:
-      - "${SPARK_MASTER_UI_PORT}:${SPARK_MASTER_UI_PORT}"
+      - "${SPARK_MASTER_UI_PORT}:8080"
       - "${SPARK_MASTER_PORT}:${SPARK_MASTER_PORT}"
     volumes:
       - .:/app
@@ -117,5 +117,8 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     volumes:
-      - ./data/minio:/data
+      - minio_data:/data
     command: server /data --console-address ":9001"
+
+volumes:
+  minio_data:
