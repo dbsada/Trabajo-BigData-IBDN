@@ -504,7 +504,8 @@ def main_docker_gcloud(db):
   """Deploy to GCloud VM via Docker Compose"""
   from cloud.gcp_orchestrator import GCPOrchestrator
   os.environ['DB_MODE'] = db
-  orch = GCPOrchestrator(mode="gcloud")
+  orch = GCPOrchestrator(mode="gcloud", db=db)
+  vm_running = False
 
   try:
     with console.status("[dim]Checking VM...[/dim]", spinner="dots"):
@@ -519,13 +520,14 @@ def main_docker_gcloud(db):
         orch.start_vm()
       with console.status("[dim]Waiting for SSH...[/dim]", spinner="dots"):
         orch.wait_for_vm(timeout=120)
+    vm_running = True
 
+    with console.status("[dim]Deploying code from GitHub...[/dim]", spinner="dots"):
+      orch.deploy_code()
     with console.status("[dim]Deploying Docker stack...[/dim]", spinner="dots"):
       orch.deploy_compose()
     with console.status("[dim]Running setup pipeline...[/dim]", spinner="dots"):
       orch.run_pipeline()
-    with console.status("[dim]Registering original model...[/dim]", spinner="dots"):
-      orch.register_original_model()
     with console.status("[dim]Starting prediction job...[/dim]", spinner="dots"):
       orch.start_prediction()
 
@@ -534,9 +536,13 @@ def main_docker_gcloud(db):
     orch.tunnel()
   except KeyboardInterrupt:
     console.print("[yellow]Interrupted. Shutting down...[/yellow]")
+  except Exception as e:
+    console.print(f"[red]Error:[/red] {e}")
+    logging.error("GCloud deploy failed", exc_info=True)
   finally:
-    with console.status("[dim]Stopping VM...[/dim]", spinner="dots"):
-      orch.stop_vm()
+    if vm_running:
+      with console.status("[dim]Stopping VM...[/dim]", spinner="dots"):
+        orch.stop_vm()
 
 def main_kubernetes_gke(db):
   """Deploy to GKE cluster"""
