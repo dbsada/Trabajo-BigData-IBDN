@@ -158,69 +158,47 @@ def api_activate_model(run_id):
     except Exception as e:
         return json_util.dumps({"error": str(e)}), 500
 
+_prediction_job_lock = threading.Lock()
+
 def _restart_prediction_job():
     import docker, requests as req, threading, time
 
-    # Get old app IDs before killing
-    old_ids = set()
-    try:
-        r = req.get("http://spark:8080/json/", timeout=3)
-        for app in r.json().get("activeapps", []):
-            if "FlightDelayPrediction" in app.get("name", ""):
-                old_ids.add(app.get("id", ""))
-    except Exception:
-        pass
+    with _prediction_job_lock:
+        old_ids = set()
+        try:
+            r = req.get("http://spark:8080/json/", timeout=3)
+            for app in r.json().get("activeapps", []):
+                if "FlightDelayPrediction" in app.get("name", ""):
+                    old_ids.add(app.get("id", ""))
+            if old_ids:
+                print(f"[PRED] Found {len(old_ids)} existing prediction job(s), skipping duplicate submit")
+                return
+        except Exception:
+            pass
 
-    # Submit new prediction job first (without killing old one)
-    try:
-        access_key = os.getenv("MINIO_ROOT_USER", "admin")
-        secret_key = os.getenv("MINIO_ROOT_PASSWORD", "password")
-        prediction_jar = os.getenv("PREDICTION_JAR",
-            "/app/flight_prediction/target/scala-2.13/flight_prediction_2.13-0.1.jar")
-        cmd = (
-            f"spark-submit --master spark://spark:7077 "
-            f"--deploy-mode cluster --conf spark.cores.max=2 "
-            f"--conf spark.hadoop.fs.s3a.access.key={access_key} "
-            f"--conf spark.hadoop.fs.s3a.secret.key={secret_key} "
-            f"--conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem "
-            f"--conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 "
-            f"--conf spark.hadoop.fs.s3a.path.style.access=true "
-            f"--conf spark.hadoop.fs.s3a.connection.ssl.enabled=false "
-            f"--class es.upm.dit.ging.predictor.MakePrediction "
-            f"{prediction_jar}"
-        )
-        client = docker.from_env()
-        container = client.containers.get("spark")
-        container.exec_run(cmd, environment={"MLFLOW_TRACKING_URI": os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")}, detach=True)
-    except Exception as e:
-        print(f"Submit prediction error: {e}")
-        return
-
-    # Wait for new app to appear (up to 20s), then kill old apps
-    def _wait_and_kill():
-        deadline = time.time() + 20
-        while time.time() < deadline:
-            time.sleep(2)
-            try:
-                r = req.get("http://spark:8080/json/", timeout=3)
-                for app in r.json().get("activeapps", []):
-                    if "FlightDelayPrediction" in app.get("name", "") and app.get("id", "") not in old_ids:
-                        for oid in old_ids:
-                            try:
-                                req.post("http://spark:8080/app/kill/", data={"id": oid, "terminate": "true"}, timeout=3)
-                            except Exception:
-                                pass
-                        return
-            except Exception:
-                pass
-        # Timeout — kill old anyway
-        for oid in old_ids:
-            try:
-                req.post("http://spark:8080/app/kill/", data={"id": oid, "terminate": "true"}, timeout=3)
-            except Exception:
-                pass
-
-    threading.Thread(target=_wait_and_kill, daemon=True).start()
+        try:
+            access_key = os.getenv("MINIO_ROOT_USER", "admin")
+            secret_key = os.getenv("MINIO_ROOT_PASSWORD", "password")
+            prediction_jar = os.getenv("PREDICTION_JAR",
+                "/app/flight_prediction/target/scala-2.13/flight_prediction_2.13-0.1.jar")
+            cmd = (
+                f"spark-submit --master spark://spark:7077 "
+                f"--deploy-mode cluster --conf spark.cores.max=2 "
+                f"--conf spark.hadoop.fs.s3a.access.key={access_key} "
+                f"--conf spark.hadoop.fs.s3a.secret.key={secret_key} "
+                f"--conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem "
+                f"--conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 "
+                f"--conf spark.hadoop.fs.s3a.path.style.access=true "
+                f"--conf spark.hadoop.fs.s3a.connection.ssl.enabled=false "
+                f"--class es.upm.dit.ging.predictor.MakePrediction "
+                f"{prediction_jar}"
+            )
+            client = docker.from_env()
+            container = client.containers.get("spark")
+            container.exec_run(cmd, environment={"MLFLOW_TRACKING_URI": os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")}, detach=True)
+            print("[PRED] Prediction job submitted")
+        except Exception as e:
+            print(f"Submit prediction error: {e}")
 
 @app.route("/api/prediction/restart", methods=["POST"])
 def api_restart_prediction():

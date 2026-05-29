@@ -324,6 +324,8 @@ $("#flight_delay_classification").submit(function(event) {
   if ($("#predict-btn").prop('disabled')) return;
   doPredict();
 });
+var pollTimer = null;
+
 function doPredict() {
   resetArch();
   startRouteAnimation();
@@ -336,11 +338,21 @@ function doPredict() {
       socket.emit('subscribe', { id: response.id });
       setTimeout(function() { advanceArch(); }, 250);  // → Kafka-L
       $("#result").empty().append("Processing...");
+      (function pollResult() {
+        fetch('/flights/delays/predict/classify_realtime/response/' + response.id).then(function(r) { return r.json(); }).then(function(res) {
+          if (res.status === "OK" && res.prediction) {
+            if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+            handlePredictionResult(res.prediction);
+          } else {
+            pollTimer = setTimeout(pollResult, 2000);
+          }
+        });
+      })();
     }
   });
 }
 
-socket.on('saved', function(data) {
+function handlePredictionResult(data) {
   if (archTimer) { clearTimeout(archTimer); archTimer = null; }
   (function step() {
     if (stepIndex >= 6) {
@@ -352,6 +364,11 @@ socket.on('saved', function(data) {
     advanceArch();
     setTimeout(step, 200);
   })();
+}
+
+socket.on('saved', function(data) {
+  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  handlePredictionResult(data);
 });
 
 function startRouteAnimation() {
@@ -821,7 +838,12 @@ function renderLogs(html) {
 }
 
 function clearLogs() {
-  clearBarrier = new Set(allKnownHashes);
+  var existingLines = logContainer ? logContainer.querySelectorAll('.log-line') : [];
+  clearBarrier = new Set();
+  existingLines.forEach(function(el) {
+    var h = el.getAttribute('data-hash');
+    if (h) clearBarrier.add(h);
+  });
   shownHashes.clear();
   if (logContainer) logContainer.innerHTML = '';
 }

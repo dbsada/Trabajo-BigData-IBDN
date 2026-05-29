@@ -76,12 +76,11 @@ def run_step(console, label, func, *args, **kwargs):
             timer.join(1)
 
 class ClusterManager:
-  def __init__(self):
-    self.home = os.path.expanduser('~')
-    self.project_home = os.path.join(self.home, os.getenv('PROJECT_HOME', 'ibdn').rstrip('/'))
-    self.venv_python = os.path.join(self.project_home, '.venv/bin/python3')
-
-    self.docker = self.DockerMode(self)
+    def __init__(self):
+        self.home = os.path.expanduser('~')
+        self.project_home = os.path.join(self.home, os.getenv('PROJECT_HOME', 'ibdn').rstrip('/'))
+        self.venv_python = os.path.join(self.project_home, '.venv/bin/python3')
+        self.docker = self.DockerMode(self)
 
     @sh
     def _cmd(self, command):
@@ -101,35 +100,35 @@ class ClusterManager:
         script_path = os.path.join(self.project_home, 'scripts', script_name)
         return self._run_python_script(script_path)
 
-  def _wait_for_port(self, port, timeout=20):
-    '''
-    Verifica si el puerto está listo antes de seguir.
-    '''
-    for _ in range(timeout):
-      try:
-        with socket.create_connection(('localhost', port), timeout=1):
-          return True
-      except (ConnectionRefusedError, socket.timeout):
-        time.sleep(1)
-    raise TimeoutError(f'Puerto {port} no disponible después de {timeout} segundos.')
+    def _wait_for_port(self, port, timeout=20):
+        '''
+        Verifica si el puerto está listo antes de seguir.
+        '''
+        for _ in range(timeout):
+            try:
+                with socket.create_connection(('localhost', port), timeout=1):
+                    return True
+            except (ConnectionRefusedError, socket.timeout):
+                time.sleep(1)
+        raise TimeoutError(f'Puerto {port} no disponible después de {timeout} segundos.')
 
-  def _wait_for_http(self, url, timeout=20):
-    logging.info(f"⏳ Esperando a que la API responda en {url}...")
-    for _ in range(timeout):
+    def _wait_for_http(self, url, timeout=20):
+        logging.info(f"⏳ Esperando a que la API responda en {url}...")
+        for _ in range(timeout):
+            try:
+                response = requests.get(url)
+                if response.status_code == 200:
+                    return True
+            except requests.ConnectionError:
+                time.sleep(1)
+        return False
+
+    def _check_port(self, port, host='localhost', timeout=0.5):
         try:
-            response = requests.get(url)
-            if response.status_code == 200:
+            with socket.create_connection((host, port), timeout=timeout):
                 return True
-        except requests.ConnectionError:
-            time.sleep(1)
-    return False
-
-  def _check_port(self, port, host='localhost', timeout=0.5):
-    try:
-      with socket.create_connection((host, port), timeout=timeout):
-        return True
-    except:
-      return False
+        except:
+            return False
 
     @sh(check=True)
     def _get_vm_ip(self):
@@ -140,20 +139,20 @@ class ClusterManager:
             vm_ip = self._get_vm_ip().stdout.strip().split()[0]
         except Exception:
             vm_ip = 'localhost'
-    table = Table(box=box.ROUNDED, title="Starting Services")
-    table.add_column("Service", style="cyan", min_width=12)
-    table.add_column("Status", justify="center", min_width=6, max_width=8)
-    table.add_column("Port", style="dim", justify="center", min_width=6, max_width=8)
-    table.add_column("URL", style="dim", justify="center", min_width=20)
-    for s in services:
-      status = s.get("status", "·")
-      name_style = "green" if s["ready"] else "grey50"
-      url = ""
-      if s["name"] in ("Flask", "MinIO", "Spark"):
-        url = f"http://{vm_ip}:{s['port']}"
-      table.add_row(Text(s["name"], style=name_style), status,
-                    str(s["port"]) if s.get("port") else "-", url)
-    return table
+        table = Table(box=box.ROUNDED, title="Starting Services")
+        table.add_column("Service", style="cyan", min_width=12)
+        table.add_column("Status", justify="center", min_width=6, max_width=8)
+        table.add_column("Port", style="dim", justify="center", min_width=6, max_width=8)
+        table.add_column("URL", style="dim", justify="center", min_width=20)
+        for s in services:
+            status = s.get("status", "·")
+            name_style = "green" if s["ready"] else "grey50"
+            url = ""
+            if s["name"] in ("Flask", "MinIO", "Spark"):
+                url = f"http://{vm_ip}:{s['port']}"
+            table.add_row(Text(s["name"], style=name_style), status,
+                          str(s["port"]) if s.get("port") else "-", url)
+        return table
 
     @sh(timeout=5)
     def _lsof_port(self, port):
@@ -305,120 +304,118 @@ class ClusterManager:
             self._docker_compose_logs(service_name, log_file)
             self._less_file(log_file)
 
-    class Database:
-      def __init__(self, manager):
-        self.m = manager
+        class Database:
+            def __init__(self, manager):
+                self.m = manager
 
-      def import_distances(self):
-        # DB_MODE ('mongo' o 'cassandra') se decide en start_services()
-        # y lo resuelve internamente scripts/import_distances.py
-        db_mode = os.getenv('DB_MODE', 'cassandra')
-        label = "Cassandra" if db_mode == 'cassandra' else "MongoDB"
-        logging.info(f"📊 Importando distancias a {label}...")
-        return self.m.run_local_script('import_distances.py')
+            def import_distances(self):
+                db_mode = os.getenv('DB_MODE', 'cassandra')
+                label = "Cassandra" if db_mode == 'cassandra' else "MongoDB"
+                logging.info(f"📊 Importando distancias a {label}...")
+                return self.m.run_local_script('import_distances.py')
 
-    class Spark:
-      def __init__(self, manager):
-        self.m = manager
-        self.container_name = os.getenv('SPARK_CONTAINER', 'spark')
-        self.prediction_log = os.getenv('PREDICTION_LOG', 'logs/flight_prediction_2.13-0.1.jar.log')
+        class Spark:
+            def __init__(self, manager):
+                self.m = manager
+                self.container_name = os.getenv('SPARK_CONTAINER', 'spark')
+                self.prediction_log = os.getenv('PREDICTION_LOG', 'logs/flight_prediction_2.13-0.1.jar.log')
 
-        def upload_to_minio(self, local_path, minio_key):
-            """Sube un archivo local a MinIO via mc pipe (usa stdin, no usa @sh)"""
-        if not os.path.exists(local_path):
-          logging.error(f"Archivo no encontrado: {local_path}")
-          return None
-        with open(local_path) as f:
-          r = subprocess.run(
-            ["docker", "exec", "-i", "minio", "mc", "pipe", f"local/{minio_key}"],
-            stdin=f, capture_output=True, text=True)
-        if r.returncode == 0:
-          logging.info(f"✅ Subido a MinIO: {minio_key}")
-        else:
-          logging.error(f"Error subiendo {minio_key}: {r.stderr.strip()}")
-        return r
+            def upload_to_minio(self, local_path, minio_key):
+                """Sube un archivo local a MinIO via mc pipe (usa stdin, no usa @sh)"""
+                if not os.path.exists(local_path):
+                    logging.error(f"Archivo no encontrado: {local_path}")
+                    return None
+                with open(local_path) as f:
+                    r = subprocess.run(
+                        ["docker", "exec", "-i", "minio", "mc", "pipe", f"local/{minio_key}"],
+                        stdin=f, capture_output=True, text=True)
+                if r.returncode == 0:
+                    logging.info(f"✅ Subido a MinIO: {minio_key}")
+                else:
+                    logging.error(f"Error subiendo {minio_key}: {r.stderr.strip()}")
+                return r
 
-      def upload_data_to_minio(self):
-        """Sube todos los archivos descargados a MinIO"""
-        project_home = os.getenv('PROJECT_HOME', os.path.expanduser('~/ibdn'))
-        files = [
-          (f"{project_home}/data/simple_flight_delay_features.jsonl.bz2", "lakehouse/raw"),
-          (f"{project_home}/data/origin_dest_distances.jsonl", "lakehouse/raw"),
-          (f"{project_home}/models/sklearn_vectorizer.pkl", "lakehouse/models"),
-          (f"{project_home}/models/sklearn_regressor.pkl", "lakehouse/models"),
-        ]
-        for local_path, minio_prefix in files:
-          if os.path.exists(local_path):
-            key = f"{minio_prefix}/{os.path.basename(local_path)}"
-            self.upload_to_minio(local_path, key)
-        logging.info("✅ Archivos subidos a MinIO")
+            def upload_data_to_minio(self):
+                """Sube todos los archivos descargados a MinIO"""
+                project_home = os.getenv('PROJECT_HOME', os.path.expanduser('~/ibdn'))
+                files = [
+                    (f"{project_home}/data/simple_flight_delay_features.jsonl.bz2", "lakehouse/raw"),
+                    (f"{project_home}/data/origin_dest_distances.jsonl", "lakehouse/raw"),
+                    (f"{project_home}/models/sklearn_vectorizer.pkl", "lakehouse/models"),
+                    (f"{project_home}/models/sklearn_regressor.pkl", "lakehouse/models"),
+                ]
+                for local_path, minio_prefix in files:
+                    if os.path.exists(local_path):
+                        key = f"{minio_prefix}/{os.path.basename(local_path)}"
+                        self.upload_to_minio(local_path, key)
+                logging.info("✅ Archivos subidos a MinIO")
 
-        @sh
-        def _spark_train_model(self):
-            spark_master = os.getenv('SPARK_MASTER_URL', 'spark://spark:7077')
-            access_key = os.getenv('MINIO_ROOT_USER', 'admin')
-            secret_key = os.getenv('MINIO_ROOT_PASSWORD', 'password')
-            minio_endpoint = os.getenv('MINIO_ENDPOINT', 'http://minio:9000')
-            prediction_jar = os.getenv('PREDICTION_JAR',
-                '/app/flight_prediction/target/scala-2.13/flight_prediction_2.13-0.1.jar')
-            return (
-                f"docker exec {self.container_name} spark-submit "
-                f"--master {spark_master} "
-                f"--deploy-mode cluster "
-                f"--conf spark.cores.max=2 "
-                f"--conf spark.hadoop.fs.s3a.access.key={access_key} "
-                f"--conf spark.hadoop.fs.s3a.secret.key={secret_key} "
-                f"--conf spark.hadoop.fs.s3a.endpoint={minio_endpoint} "
-                f"--conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem "
-                f"--conf spark.hadoop.fs.s3a.path.style.access=true "
-                f"--conf spark.hadoop.fs.s3a.connection.ssl.enabled=false "
-                f"--conf spark.driver.extraJavaOptions=--add-opens=java.base/sun.util.calendar=ALL-UNNAMED "
-                f"--class es.upm.dit.ging.predictor.TrainModel "
-                f"{prediction_jar}"
-            )
+            @sh
+            def _spark_train_model(self):
+                spark_master = os.getenv('SPARK_MASTER_URL', 'spark://spark:7077')
+                access_key = os.getenv('MINIO_ROOT_USER', 'admin')
+                secret_key = os.getenv('MINIO_ROOT_PASSWORD', 'password')
+                minio_endpoint = os.getenv('MINIO_ENDPOINT', 'http://minio:9000')
+                prediction_jar = os.getenv('PREDICTION_JAR',
+                    '/app/flight_prediction/target/scala-2.13/flight_prediction_2.13-0.1.jar')
+                return (
+                    f"docker exec {self.container_name} spark-submit "
+                    f"--master {spark_master} "
+                    f"--deploy-mode cluster "
+                    f"--conf spark.cores.max=2 "
+                    f"--conf spark.hadoop.fs.s3a.access.key={access_key} "
+                    f"--conf spark.hadoop.fs.s3a.secret.key={secret_key} "
+                    f"--conf spark.hadoop.fs.s3a.endpoint={minio_endpoint} "
+                    f"--conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem "
+                    f"--conf spark.hadoop.fs.s3a.path.style.access=true "
+                    f"--conf spark.hadoop.fs.s3a.connection.ssl.enabled=false "
+                    f"--conf spark.driver.extraJavaOptions=--add-opens=java.base/sun.util.calendar=ALL-UNNAMED "
+                    f"--class es.upm.dit.ging.predictor.TrainModel "
+                    f"{prediction_jar}"
+                )
 
-        def train_model(self):
-            logging.info("🧠 Iniciando entrenamiento Spark MLlib...")
-            return self._spark_train_model()
+            def train_model(self):
+                logging.info("🧠 Iniciando entrenamiento Spark MLlib...")
+                return self._spark_train_model()
 
-        def _spark_predict_cmd(self):
-            spark_master = os.getenv('SPARK_MASTER_URL', 'spark://spark:7077')
-            minio_endpoint = os.getenv('MINIO_ENDPOINT', 'http://minio:9000')
-            access_key = os.getenv('MINIO_ROOT_USER', 'admin')
-            secret_key = os.getenv('MINIO_ROOT_PASSWORD', 'password')
-            prediction_jar = os.getenv('PREDICTION_JAR',
-                '/app/flight_prediction/target/scala-2.13/flight_prediction_2.13-0.1.jar')
-            return (
-                f"docker exec {self.container_name} spark-submit "
-                f"--master {spark_master} "
-                f"--deploy-mode cluster "
-                f"--conf spark.cores.max=2 "
-                f"--conf spark.hadoop.fs.s3a.endpoint={minio_endpoint} "
-                f"--conf spark.hadoop.fs.s3a.access.key={access_key} "
-                f"--conf spark.hadoop.fs.s3a.secret.key={secret_key} "
-                f"--conf spark.hadoop.fs.s3a.path.style.access=true "
-                f"--conf spark.hadoop.fs.s3a.connection.ssl.enabled=false "
-                f"--conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem "
-                f"--class es.upm.dit.ging.predictor.MakePrediction "
-                f"{prediction_jar}"
-            )
+            def _spark_predict_cmd(self):
+                spark_master = os.getenv('SPARK_MASTER_URL', 'spark://spark:7077')
+                minio_endpoint = os.getenv('MINIO_ENDPOINT', 'http://minio:9000')
+                access_key = os.getenv('MINIO_ROOT_USER', 'admin')
+                secret_key = os.getenv('MINIO_ROOT_PASSWORD', 'password')
+                prediction_jar = os.getenv('PREDICTION_JAR',
+                    '/app/flight_prediction/target/scala-2.13/flight_prediction_2.13-0.1.jar')
+                return (
+                    f"docker exec {self.container_name} spark-submit "
+                    f"--master {spark_master} "
+                    f"--deploy-mode cluster "
+                    f"--conf spark.cores.max=2 "
+                    f"--conf spark.hadoop.fs.s3a.endpoint={minio_endpoint} "
+                    f"--conf spark.hadoop.fs.s3a.access.key={access_key} "
+                    f"--conf spark.hadoop.fs.s3a.secret.key={secret_key} "
+                    f"--conf spark.hadoop.fs.s3a.path.style.access=true "
+                    f"--conf spark.hadoop.fs.s3a.connection.ssl.enabled=false "
+                    f"--conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem "
+                    f"--class es.upm.dit.ging.predictor.MakePrediction "
+                    f"{prediction_jar}"
+                )
 
-        def predict_delay(self):
-            logging.info("🧠 Lanzando predicción en Spark...")
-            cmd = self._spark_predict_cmd()
-            return self.m._run_popen(cmd)
+            def predict_delay(self):
+                logging.info("🧠 Lanzando predicción en Spark...")
+                cmd = self._spark_predict_cmd()
+                return self.m._run_popen(cmd)
 
-        @sh
-        def _show_prediction_logs(self):
-            return f"less -S +G {self.prediction_log}"
+            @sh
+            def _show_prediction_logs(self):
+                return f"less -S +G {self.prediction_log}"
 
-        def show_prediction_logs(self):
-            '''Abre el log del JAR de Scala con less'''
-            if os.path.exists(self.prediction_log):
-                self._show_prediction_logs()
-            else:
-                rich.print("[bold red]Archivo de log no encontrado.[/bold red]")
-        
+            def show_prediction_logs(self):
+                '''Abre el log del JAR de Scala con less'''
+                if os.path.exists(self.prediction_log):
+                    self._show_prediction_logs()
+                else:
+                    rich.print("[bold red]Archivo de log no encontrado.[/bold red]")
+
         class Kafka:
             def __init__(self, manager):
                 self.m = manager
@@ -436,9 +433,9 @@ class ClusterManager:
             def create_topic(self, topic_name):
                 return self._create_kafka_topic(topic_name)
 
-  class KubernetesMode:
-    def __init__(self, manager):
-      raise NotImplementedError('Modo Kubernetes no implementado aún.')
+    class KubernetesMode:
+        def __init__(self, manager):
+            raise NotImplementedError('Modo Kubernetes no implementado aún.')
 
 def main_docker(db: Literal['mongo', 'cassandra'] = 'mongo'):
     manager = ClusterManager()
