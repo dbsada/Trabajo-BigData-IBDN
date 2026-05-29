@@ -1,0 +1,23 @@
+# NOTE: Use `source setup.sh` instead of `pip install -e .` (instant, no corruption on Ctrl+C)
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flight-prediction-orchestrator"
+version = "2.0"
+description = "Cluster Orchestrator for Flight Delay Prediction — IBDN"
+requires-python = ">=3.7"
+dependencies = [
+    "boto3>=1.43",
+    "rich>=15.0",
+    "requests>=2.33",
+    "typer>=0.15",
+    "questionary>=2.1",
+]
+
+[project.scripts]
+f-pred = "cloud.cli:main"
+
+[tool.setuptools]
+packages = ["cloud", "utils"]

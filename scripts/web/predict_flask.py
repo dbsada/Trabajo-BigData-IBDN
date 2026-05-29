@@ -158,6 +158,43 @@ def api_activate_model(run_id):
     except Exception as e:
         return json_util.dumps({"error": str(e)}), 500
 
+_pipeline_state_file = '/tmp/pipeline_state.json'
+_pipeline_state_lock = threading.Lock()
+
+def _load_pipeline_state():
+    try:
+        with open(_pipeline_state_file) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_pipeline_state(state):
+    with open(_pipeline_state_file, 'w') as f:
+        json.dump(state, f)
+
+@app.route("/api/pipeline/progress", methods=["POST"])
+def api_pipeline_progress():
+    data = request.get_json(silent=True) or {}
+    step = data.get("step")
+    status = data.get("status")
+    message = data.get("message", "")
+    if not step or not status:
+        return json_util.dumps({"error": "step and status required"}), 400
+    with _pipeline_state_lock:
+        state = _load_pipeline_state()
+        state[step] = {"status": status, "message": message, "ts": time.time()}
+        _save_pipeline_state(state)
+    socketio.emit('pipeline_progress', {"step": step, "status": status, "message": message})
+    return json_util.dumps({"ok": True})
+
+@app.route("/api/pipeline/progress")
+def api_get_pipeline_progress():
+    return json_util.dumps(_load_pipeline_state())
+
+@app.route("/pipeline")
+def pipeline_page():
+    return render_template('pipeline.html')
+
 _prediction_job_lock = threading.Lock()
 
 def _restart_prediction_job():
@@ -166,7 +203,7 @@ def _restart_prediction_job():
     with _prediction_job_lock:
         old_ids = set()
         try:
-            r = req.get("http://spark:8080/json/", timeout=3)
+            r = req.get("http://spark-manager:8080/json/", timeout=3)
             for app in r.json().get("activeapps", []):
                 if "FlightDelayPrediction" in app.get("name", ""):
                     old_ids.add(app.get("id", ""))
@@ -182,7 +219,7 @@ def _restart_prediction_job():
             prediction_jar = os.getenv("PREDICTION_JAR",
                 "/app/flight_prediction/target/scala-2.13/flight_prediction_2.13-0.1.jar")
             cmd = (
-                f"spark-submit --master spark://spark:7077 "
+                f"spark-submit --master spark://spark-manager:7077 "
                 f"--deploy-mode cluster --conf spark.cores.max=2 "
                 f"--conf spark.hadoop.fs.s3a.access.key={access_key} "
                 f"--conf spark.hadoop.fs.s3a.secret.key={secret_key} "
@@ -194,7 +231,7 @@ def _restart_prediction_job():
                 f"{prediction_jar}"
             )
             client = docker.from_env()
-            container = client.containers.get("spark")
+            container = client.containers.get("spark-manager")
             container.exec_run(cmd, environment={"MLFLOW_TRACKING_URI": os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")}, detach=True)
             print("[PRED] Prediction job submitted")
         except Exception as e:
@@ -209,7 +246,7 @@ def api_restart_prediction():
 def api_prediction_status():
     import requests as req
     try:
-        r = req.get("http://spark:8080/json/", timeout=3)
+        r = req.get("http://spark-manager:8080/json/", timeout=3)
         for app in r.json().get("activeapps", []):
             if "FlightDelayPrediction" in app.get("name", ""):
                 return json_util.dumps({"running": True})
@@ -226,7 +263,7 @@ def api_train_model():
     with _train_lock:
         if getattr(api_train_model, "_training", False):
             try:
-                r = req.get("http://spark:8080/json/", timeout=3)
+                r = req.get("http://spark-manager:8080/json/", timeout=3)
                 has_app = any("train_spark_mllib_model" in a.get("name", "")
                               for a in r.json().get("activeapps", []))
             except Exception:
@@ -259,12 +296,12 @@ def api_train_model():
         # Kill any stale training apps or resource-hogging apps on Spark
         try:
             import requests as req
-            r = req.get("http://spark:8080/json/", timeout=3)
+            r = req.get("http://spark-manager:8080/json/", timeout=3)
             data = r.json()
             for app in data.get("activeapps", []):
                 if "train_spark_mllib_model" in app.get("name", ""):
                     app_id = app.get("id", "")
-                    req.post("http://spark:8080/app/kill/", data={"id": app_id, "terminate": "true"}, timeout=3)
+                    req.post("http://spark-manager:8080/app/kill/", data={"id": app_id, "terminate": "true"}, timeout=3)
         except Exception:
             pass
 
@@ -281,12 +318,12 @@ def api_train_model():
 
         def _train():
             try:
-                container = client.containers.get("spark")
+                container = client.containers.get("spark-manager")
                 name_flag = " --run-name " + run_name + " " if run_name else " "
                 prediction_jar = os.getenv("PREDICTION_JAR",
                     "/app/flight_prediction/target/scala-2.13/flight_prediction_2.13-0.1.jar")
                 log_resp = container.exec_run(
-                    "spark-submit --master spark://spark:7077 "
+                    "spark-submit --master spark://spark-manager:7077 "
                     "--deploy-mode cluster "
                     "--conf spark.cores.max=2 "
                     "--conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 "
@@ -332,7 +369,7 @@ def api_train_status():
     import requests as req, time as _time
     now = _time.time()
     try:
-        r = req.get("http://spark:8080/json/", timeout=5)
+        r = req.get("http://spark-manager:8080/json/", timeout=5)
         data = r.json()
         for app in data.get("activeapps", []):
             if "train_spark_mllib_model" in app.get("name", ""):
@@ -354,13 +391,13 @@ def api_train_status():
 def api_cancel_training():
     import requests as req
     try:
-        r = req.get("http://spark:8080/json/", timeout=3)
+        r = req.get("http://spark-manager:8080/json/", timeout=3)
         data = r.json()
         killed = []
         for app in data.get("activeapps", []):
             if "train_spark_mllib_model" in app.get("name", ""):
                 app_id = app.get("id", "")
-                req.post("http://spark:8080/app/kill/", data={"id": app_id, "terminate": "true"}, timeout=3)
+                req.post("http://spark-manager:8080/app/kill/", data={"id": app_id, "terminate": "true"}, timeout=3)
                 killed.append(app_id)
         api_train_model._training = False
         return json_util.dumps({"ok": True, "killed": killed})
@@ -404,7 +441,7 @@ def api_delete_model(run_id):
 @app.route("/api/services/status")
 def api_services_status():
     import docker
-    expected = ['kafka', 'mongodb', 'cassandra', 'spark', 'spark-worker', 'flask', 'minio', 'mlflow']
+    expected = ['kafka', 'mongodb', 'cassandra', 'spark-manager', 'spark-worker', 'flask', 'minio', 'mlflow']
     services = {}
     try:
         client = docker.from_env()
@@ -707,14 +744,17 @@ def airline(carrier_code):
 # Home page — flight delay prediction
 @app.route("/")
 def index():
-  form_config = [
-    {'field': 'DepDelay', 'label': 'Departure Delay', 'value': 5, 'type': 'number'},
-    {'field': 'Carrier', 'value': 'AA', 'type': 'text'},
-    {'field': 'FlightDate', 'label': 'Date', 'value': '2016-12-25', 'type': 'date'},
-    {'field': 'Origin', 'value': 'ATL', 'type': 'text'},
-    {'field': 'Dest', 'label': 'Destination', 'value': 'SFO', 'type': 'text'},
-  ]
-  return render_template('flight_delays_predict_kafka.html', form_config=form_config)
+    state = _load_pipeline_state()
+    if state and 'done' not in state:
+        return render_template('pipeline.html')
+    form_config = [
+        {'field': 'DepDelay', 'label': 'Departure Delay', 'value': 5, 'type': 'number'},
+        {'field': 'Carrier', 'value': 'AA', 'type': 'text'},
+        {'field': 'FlightDate', 'label': 'Date', 'value': '2016-12-25', 'type': 'date'},
+        {'field': 'Origin', 'value': 'ATL', 'type': 'text'},
+        {'field': 'Dest', 'label': 'Destination', 'value': 'SFO', 'type': 'text'},
+    ]
+    return render_template('flight_delays_predict_kafka.html', form_config=form_config)
 
 @app.route("/airlines")
 @app.route("/airlines/")
@@ -1163,13 +1203,16 @@ def activate_model(run_id):
 
 def _auto_start_prediction():
     """Start prediction job on Flask boot if there's an active model and no running job."""
+    if os.getenv('SKIP_AUTO_START_PREDICTION'):
+        print("[BOOT] SKIP_AUTO_START_PREDICTION set, skipping auto-start")
+        return
     import boto3
     from botocore.config import Config
     def _boot_start():
         time.sleep(5)  # Wait for Kafka to be ready
         try:
             import requests as req
-            r = req.get("http://spark:8080/json/", timeout=3)
+            r = req.get("http://spark-manager:8080/json/", timeout=3)
             has_pred = any("FlightDelayPrediction" in a.get("name", "") for a in r.json().get("activeapps", []))
             if has_pred:
                 print("[BOOT] Prediction job already running, skipping auto-start")

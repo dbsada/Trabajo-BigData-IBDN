@@ -45,11 +45,11 @@ services:
         limits:
           memory: 2G
 
-  spark:
+  spark-manager:
     build:
       context: .
       dockerfile: docker/dockerfile.spark
-    container_name: spark
+    container_name: spark-manager
     ports:
       - "${SPARK_MASTER_UI_PORT}:8080"
       - "${SPARK_MASTER_PORT}:${SPARK_MASTER_PORT}"
@@ -71,7 +71,7 @@ services:
       dockerfile: docker/dockerfile.spark
     container_name: spark-worker
     depends_on:
-      - spark
+      - spark-manager
     volumes:
       - .:/app
       - ./data/coursier:/root/.cache/coursier
@@ -79,12 +79,13 @@ services:
     working_dir: /app
     environment:
       - SPARK_MASTER=${SPARK_MASTER_URL}
-      - SPARK_WORKER_MEMORY=2G
+      - SPARK_WORKER_MEMORY=6G
+      - SPARK_WORKER_CORES=4
     command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker ${SPARK_MASTER_URL}
     deploy:
       resources:
         limits:
-          memory: 3G
+          memory: 7G
 
   flask:
     build:
@@ -110,6 +111,7 @@ services:
       - KAFKA_RESPONSE_TOPIC=${KAFKA_RESPONSE_TOPIC}
       - KAFKA_STATUS_TOPIC=${KAFKA_STATUS_TOPIC}
       - MLFLOW_TRACKING_URI=${MLFLOW_TRACKING_URI}
+      - SKIP_AUTO_START_PREDICTION=${SKIP_AUTO_START_PREDICTION:-0}
     deploy:
       resources:
         limits:

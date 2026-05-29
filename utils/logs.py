@@ -9,8 +9,8 @@ _spark_cache_lock = threading.Lock()
 
 SERVICE_COLORS = {
     'kafka': '#9c36b5',
-    'spark': '#fdc41b',
-    'spark-worker': '#fdc41b',
+    'spark-manager': '#fdc41b',
+    'spark-worker': '#e05a5a',
     'cassandra': '#2f9e44',
     'mongodb': '#2f9e44',
     'flask': '#1971c2',
@@ -21,7 +21,7 @@ SERVICE_COLORS = {
 def _get_spark_app_id():
     try:
         import requests as req
-        r = req.get("http://spark:8080/json/", timeout=3)
+        r = req.get("http://spark-manager:8080/json/", timeout=3)
         for app in r.json().get("activeapps", []):
             if "FlightDelayPrediction" in app.get("name", ""):
                 return app.get("id", "")
@@ -91,7 +91,7 @@ def _collect_spark_stdout(client, all_lines):
                     if content_hash not in _spark_line_cache:
                         _spark_line_cache[content_hash] = (now, line)
                     ts, _ = _spark_line_cache[content_hash]
-                    all_lines.append((ts, 'spark', SERVICE_COLORS['spark'], line, content_hash))
+                    all_lines.append((ts, 'spark-worker', SERVICE_COLORS['spark-worker'], line, content_hash))
                 if len(_spark_line_cache) > 500:
                     sorted_hashes = sorted(_spark_line_cache, key=lambda k: _spark_line_cache[k][0])
                     for h in sorted_hashes[:200]:
@@ -111,7 +111,7 @@ def _collect_spark_stdout(client, all_lines):
                         if content_hash not in _spark_line_cache:
                             _spark_line_cache[content_hash] = (now, line)
                         ts, _ = _spark_line_cache[content_hash]
-                        all_lines.append((ts, 'spark', '#e05a5a', '[ERR] ' + line, content_hash))
+                        all_lines.append((ts, 'spark-worker', '#e05a5a', '[ERR] ' + line, content_hash))
     except Exception:
         pass
 
@@ -130,7 +130,7 @@ class Logs:
     @staticmethod
     def get_all_logs(db_mode):
         import docker
-        base_services = ['kafka', 'spark', 'spark-worker', 'flask', 'minio', 'mlflow']
+        base_services = ['kafka', 'spark-manager', 'spark-worker', 'flask', 'minio', 'mlflow']
         try:
             client = docker.from_env()
             all_lines = _collect_docker_logs(client, base_services, db_mode)
