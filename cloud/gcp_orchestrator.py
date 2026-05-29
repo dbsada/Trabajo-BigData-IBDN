@@ -1,6 +1,7 @@
 import os, time, subprocess, logging
 from rich.console import Console
 from rich.panel import Panel
+from utils.shell import sh
 
 _log_console = Console()
 
@@ -18,26 +19,32 @@ class GCPOrchestrator:
         self.repo = os.getenv("REMOTE_REPO", "~/ibdn")
         self.access_key = os.getenv("MINIO_ROOT_USER", "admin")
         self.secret_key = os.getenv("MINIO_ROOT_PASSWORD", "password")
-        self._base = ["gcloud", "compute", "--project", self.project]
+
+    def _gcloud_cmd(self, *args):
+        return f"gcloud compute --project {self.project} {' '.join(args)}"
+
+    def _ssh_cmd(self, command):
+        return (
+            f"gcloud compute ssh {self.user}@{self.instance} "
+            f"--zone {self.zone} --command '{command}' --quiet "
+            f"--project {self.project}"
+        )
 
     def _detect_project(self):
         try:
-            r = subprocess.run(["gcloud", "config", "get-value", "project"], capture_output=True, text=True, check=True)
+            r = subprocess.run(
+                ["gcloud", "config", "get-value", "project"],
+                capture_output=True, text=True, check=True)
             return r.stdout.strip()
         except Exception:
             raise RuntimeError("GCP_PROJECT not set and could not detect from gcloud config. Set it in .env")
 
-    def _gcloud(self, *args, **kwargs):
-        cmd = self._base + list(args)
-        return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
-
-    def _ssh(self, command, **kwargs):
-        kwargs.pop("check", None)
-        cmd = self._base + [
-            "ssh", f"{self.user}@{self.instance}",
-            "--zone", self.zone, "--command", command, "--quiet",
-        ]
-        return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
+    def _check_or_fail(self, r, label=""):
+        if r.returncode != 0:
+            logging.error(f"{label} failed (exit {r.returncode})\nFull stderr saved below:\n{r.stderr.strip()}")
+            self._show_error(f"{label} falló", r.stderr)
+            raise RuntimeError(f"{label} (exit {r.returncode})")
+        return r
 
     def _show_error(self, title, detail):
         _log_console.print()
@@ -51,114 +58,168 @@ class GCPOrchestrator:
             border_style="red", expand=False
         ))
 
-    def _ssh_or_fail(self, command, label=""):
-        r = self._ssh(command)
-        if r.returncode != 0:
-            logging.error(f"{label} failed (exit {r.returncode})\nFull stderr saved below:\n{r.stderr.strip()}")
-            self._show_error(f"{label} falló", r.stderr)
-            raise RuntimeError(f"{label} (exit {r.returncode})")
-        return r
-
     # ---- VM Control ----
 
+    @sh
+    def _gcloud_describe_instance(self):
+        return self._gcloud_cmd("instances", "describe", self.instance, "--zone", self.zone)
+
     def vm_exists(self):
-        r = self._gcloud("instances", "describe", self.instance, "--zone", self.zone)
-        return r.returncode == 0
+        return self._gcloud_describe_instance().returncode == 0
+
+    @sh
+    def _gcloud_create_vm(self):
+        cloud_init = os.path.join(os.path.dirname(__file__), "cloud-init.yaml")
+        return (
+            f"gcloud compute instances create {self.instance} "
+            f"--zone {self.zone} --machine-type=e2-standard-4 "
+            f"--image-family=ubuntu-2204-lts --image-project=ubuntu-os-cloud "
+            f"--boot-disk-size=50 "
+            f"--metadata-from-file user-data={cloud_init} "
+            f"--project {self.project}"
+        )
 
     def create_vm(self):
         log("Creating VM...")
-        cloud_init = os.path.join(os.path.dirname(__file__), "cloud-init.yaml")
-        cmd = self._base + [
-            "instances", "create", self.instance,
-            "--zone", self.zone,
-            "--machine-type=e2-standard-4",
-            "--image-family=ubuntu-2204-lts",
-            "--image-project=ubuntu-os-cloud",
-            "--boot-disk-size=50",
-            "--metadata-from-file", f"user-data={cloud_init}",
-        ]
-        r = subprocess.run(cmd, capture_output=True, text=True)
+        r = self._gcloud_create_vm()
         if r.returncode != 0:
             logging.error(f"VM creation failed (exit {r.returncode})\n{r.stderr.strip()}")
             self._show_error("VM creation falló", r.stderr)
             raise RuntimeError(f"VM creation failed (exit {r.returncode})")
         log("VM created.")
 
+    @sh(check=True)
     def start_vm(self):
-        self._gcloud("instances", "start", self.instance, "--zone", self.zone, check=True)
+        return self._gcloud_cmd("instances", "start", self.instance, "--zone", self.zone)
 
+    @sh(check=True)
     def stop_vm(self):
-        self._gcloud("instances", "stop", self.instance, "--zone", self.zone, check=True)
+        return self._gcloud_cmd("instances", "stop", self.instance, "--zone", self.zone)
+
+    @sh
+    def _ssh_echo_ready(self):
+        return self._ssh_cmd("echo ready")
+
+    @sh
+    def _ssh_docker_compose_version(self):
+        return self._ssh_cmd("docker compose version")
 
     def wait_for_vm(self, timeout=180):
         for _ in range(timeout):
-            r = self._ssh("echo ready")
-            if r.returncode == 0:
-                # Wait for cloud-init + docker compose to be ready
+            if self._ssh_echo_ready().returncode == 0:
                 for _ in range(timeout // 2):
-                    r = self._ssh("docker compose version")
-                    if r.returncode == 0:
+                    if self._ssh_docker_compose_version().returncode == 0:
                         return
                     time.sleep(2)
                 raise TimeoutError("Docker compose not ready after provisioning")
             time.sleep(2)
         raise TimeoutError("VM not ready after %ds" % timeout)
 
+    @sh(check=True)
+    def _gcloud_get_external_ip(self):
+        return (
+            f"gcloud compute instances describe {self.instance} "
+            f"--zone {self.zone} "
+            f"--format=value(networkInterfaces[0].accessConfigs[0].natIP) "
+            f"--project {self.project}"
+        )
+
     def get_external_ip(self):
-        r = self._gcloud(
-            "instances", "describe", self.instance, "--zone", self.zone,
-            "--format=value(networkInterfaces[0].accessConfigs[0].natIP)", check=True)
-        return r.stdout.strip()
+        return self._gcloud_get_external_ip().stdout.strip()
 
     # ---- Deploy ----
 
-    def deploy_code(self):
+    @sh
+    def _ssh_check_repo(self):
+        return self._ssh_cmd(f"test -d {self.repo}/.git")
+
+    @sh
+    def _ssh_git_pull(self):
+        return self._ssh_cmd(f"cd {self.repo} && git pull")
+
+    @sh
+    def _ssh_git_clone(self):
         github_repo = os.getenv("GITHUB_REPO")
         if not github_repo:
             raise RuntimeError("GITHUB_REPO not set in .env")
-        r = self._ssh(f"test -d {self.repo}/.git")
+        return self._ssh_cmd(f"git clone {github_repo} {self.repo}")
+
+    def deploy_code(self):
+        r = self._ssh_check_repo()
         if r.returncode == 0:
             log("Pulling latest code...")
-            self._ssh_or_fail(f"cd {self.repo} && git pull", "git pull")
+            self._check_or_fail(self._ssh_git_pull(), "git pull")
         else:
             log("Cloning repository...")
-            self._ssh_or_fail(f"git clone {github_repo} {self.repo}", "git clone")
+            self._check_or_fail(self._ssh_git_clone(), "git clone")
+
+    @sh
+    def _ssh_deploy_env(self):
+        return self._ssh_cmd(f"cp {self.repo}/.env.example {self.repo}/.env")
 
     def deploy_env(self):
-        self._ssh_or_fail(f"cp {self.repo}/.env.example {self.repo}/.env", "deploy_env")
+        self._check_or_fail(self._ssh_deploy_env(), "deploy_env")
+
+    @sh
+    def _ssh_docker_pull(self):
+        return self._ssh_cmd(f"cd {self.repo} && docker compose --profile db_{self.db} pull")
 
     def deploy_pull(self):
-        self._ssh_or_fail(f"cd {self.repo} && docker compose --profile db_{self.db} pull", "docker pull")
+        self._check_or_fail(self._ssh_docker_pull(), "docker pull")
+
+    @sh
+    def _ssh_docker_build(self):
+        return self._ssh_cmd(f"cd {self.repo} && docker compose --profile db_{self.db} build")
 
     def deploy_build(self):
-        self._ssh_or_fail(f"cd {self.repo} && docker compose --profile db_{self.db} build", "docker build")
+        self._check_or_fail(self._ssh_docker_build(), "docker build")
+
+    @sh
+    def _ssh_docker_up(self):
+        return self._ssh_cmd(f"cd {self.repo} && docker compose --profile db_{self.db} up -d")
 
     def deploy_up(self):
-        self._ssh_or_fail(f"cd {self.repo} && docker compose --profile db_{self.db} up -d", "docker up")
+        self._check_or_fail(self._ssh_docker_up(), "docker up")
 
     def deploy_compose(self):
         self.deploy_pull()
         self.deploy_build()
         self.deploy_up()
 
+    @sh
+    def _ssh_docker_down(self):
+        return self._ssh_cmd(f"cd {self.repo} && docker compose --profile db_{self.db} down 2>/dev/null; true")
+
     def deploy_down(self):
-        self._ssh(f"cd {self.repo} && docker compose --profile db_{self.db} down 2>/dev/null; true")
+        self._ssh_docker_down()
+
+    @sh
+    def _ssh_mkdir_jar(self):
+        return self._ssh_cmd(f"mkdir -p {self.repo}/flight_prediction/target/scala-2.13")
+
+    @sh
+    def _gcloud_scp_jar(self, local_jar):
+        return (
+            f"gcloud compute scp {local_jar} "
+            f"{self.user}@{self.instance}:{self.repo}/flight_prediction/target/scala-2.13/ "
+            f"--zone {self.zone} --quiet --project {self.project}"
+        )
 
     def deploy_jar(self, local_jar):
-        self._ssh(f"mkdir -p {self.repo}/flight_prediction/target/scala-2.13", check=False)
-        r = subprocess.run(
-            self._base + ["scp", local_jar, f"{self.user}@{self.instance}:{self.repo}/flight_prediction/target/scala-2.13/",
-                          "--zone", self.zone, "--quiet"],
-            capture_output=True, text=True)
+        self._ssh_mkdir_jar()
+        r = self._gcloud_scp_jar(local_jar)
         if r.returncode != 0:
             raise RuntimeError(f"SCP JAR failed: {r.stderr.strip()}")
+
+    @sh
+    def _ssh_run_pipeline_cmd(self, cmd):
+        return self._ssh_cmd(cmd)
 
     def run_pipeline(self):
         env = f"DB_MODE={self.db}"
         commands = [
             f"cd {self.repo} && {env} python3 scripts/create_bucket.py",
             f"cd {self.repo} && {env} python3 scripts/download_data.py",
-            # Configure mc alias and upload data to MinIO
             f"cd {self.repo} && docker exec minio mc alias set local http://localhost:9000 {self.access_key} {self.secret_key} 2>/dev/null; true",
         ]
         data_files = [
@@ -166,20 +227,21 @@ class GCPOrchestrator:
             ("data/origin_dest_distances.jsonl", "lakehouse/raw"),
         ]
         for local_path, bucket in data_files:
+            fname = local_path.split('/')[-1]
             commands.append(
-                f"cd {self.repo} && docker cp {local_path} minio:/tmp/ && docker exec minio mc cp /tmp/{local_path.split('/')[-1]} local/{bucket}/")
+                f"cd {self.repo} && docker cp {local_path} minio:/tmp/ && docker exec minio mc cp /tmp/{fname} local/{bucket}/")
         commands += [
             f"cd {self.repo} && {env} python3 scripts/import_distances.py",
-            # Create Kafka topics
             f"cd {self.repo} && docker exec kafka /opt/kafka/bin/kafka-topics.sh --create --bootstrap-server localhost:9092 --topic flight-delay-ml-request --partitions 1 --replication-factor 1 --if-not-exists 2>/dev/null; true",
             f"cd {self.repo} && docker exec kafka /opt/kafka/bin/kafka-topics.sh --create --bootstrap-server localhost:9092 --topic flight-delay-ml-response --partitions 1 --replication-factor 1 --if-not-exists 2>/dev/null; true",
             f"cd {self.repo} && docker exec kafka /opt/kafka/bin/kafka-topics.sh --create --bootstrap-server localhost:9092 --topic flight-delay-ml-status --partitions 1 --replication-factor 1 --if-not-exists 2>/dev/null; true",
         ]
         for cmd in commands:
-            self._ssh_or_fail(cmd, "Pipeline step")
+            self._check_or_fail(self._ssh_run_pipeline_cmd(cmd), "Pipeline step")
 
+    @sh
     def start_prediction(self):
-        cmd = (
+        return self._ssh_cmd(
             f"cd {self.repo} && docker exec -d spark spark-submit "
             f"--master spark://spark:7077 "
             f"--deploy-mode cluster "
@@ -193,33 +255,39 @@ class GCPOrchestrator:
             f"--class es.upm.dit.ging.predictor.MakePrediction "
             f"/app/flight_prediction/target/scala-2.13/flight_prediction_2.13-0.1.jar"
         )
-        self._ssh(cmd, check=False)
 
     # ---- Tunnel ----
 
-    def ensure_iap(self):
-        """Enable IAP API and add firewall rule for IAP tunnel access"""
-        log("Enabling IAP API...")
-        subprocess.run(
-            ["gcloud", "services", "enable", "iap.googleapis.com",
-             "--project", self.project],
-            capture_output=True, timeout=60)
+    @sh(timeout=60)
+    def _iap_enable_api(self):
+        return f"gcloud services enable iap.googleapis.com --project {self.project}"
 
-        rules = subprocess.run(
-            ["gcloud", "compute", "firewall-rules", "list",
-             "--filter=name=allow-iap", "--project", self.project,
-             "--format=value(name)"],
-            capture_output=True, text=True, timeout=10)
+    @sh(timeout=10)
+    def _iap_list_firewall(self):
+        return (
+            f"gcloud compute firewall-rules list "
+            f"--filter=name=allow-iap --project {self.project} "
+            f"--format=value(name)"
+        )
+
+    @sh(timeout=30, check=True)
+    def _iap_create_firewall(self):
+        return (
+            f"gcloud compute firewall-rules create allow-iap "
+            f"--direction=INGRESS --priority=1000 "
+            f"--network=default --action=ALLOW "
+            f"--rules=tcp:5001,tcp:5002 "
+            f"--source-ranges=35.235.240.0/20 "
+            f"--project {self.project}"
+        )
+
+    def ensure_iap(self):
+        log("Enabling IAP API...")
+        self._iap_enable_api()
+        rules = self._iap_list_firewall()
         if "allow-iap" not in rules.stdout:
             log("Creating IAP firewall rule...")
-            subprocess.run([
-                "gcloud", "compute", "firewall-rules", "create", "allow-iap",
-                "--direction=INGRESS", "--priority=1000",
-                "--network=default", "--action=ALLOW",
-                "--rules=tcp:5001,tcp:5002",
-                "--source-ranges=35.235.240.0/20",
-                "--project", self.project,
-            ], capture_output=True, check=True, timeout=30)
+            self._iap_create_firewall()
             log("IAP firewall rule created")
 
     def tunnel(self):
@@ -239,7 +307,6 @@ class GCPOrchestrator:
                 p = subprocess.Popen(cmd, stdout=log_file, stderr=log_file)
                 procs.append(p)
                 time.sleep(3)
-
             log(f"IAP tunnels ready: localhost:{ports[0]}, localhost:{ports[1]}")
             while True:
                 time.sleep(1)
@@ -266,20 +333,28 @@ class GCPOrchestrator:
 
     def create_gke_cluster(self):
         log("Creating GKE cluster...")
-        cmd = [
-            "gcloud", "container", "--project", self.project,
-            "clusters", "create", "ibdn-cluster",
-            "--zone", self.zone, "--num-nodes=3",
-            "--machine-type=e2-small", "--disk-size=30",
-        ]
-        subprocess.run(cmd, check=True)
+        self._gcloud_create_gke_cluster()
+
+    @sh(check=True)
+    def _gcloud_create_gke_cluster(self):
+        return (
+            f"gcloud container --project {self.project} "
+            f"clusters create ibdn-cluster "
+            f"--zone {self.zone} --num-nodes=3 "
+            f"--machine-type=e2-small --disk-size=30"
+        )
+
+    @sh(check=True)
+    def _kubectl_apply_k8s(self):
+        k8s_dir = os.path.join(os.path.dirname(__file__), "k8s")
+        return f"kubectl apply -f {k8s_dir}"
 
     def deploy_k8s(self):
         k8s_dir = os.path.join(os.path.dirname(__file__), "k8s")
         if not os.path.isdir(k8s_dir):
             log("No k8s/ directory found.")
             return
-        subprocess.run(["kubectl", "apply", "-f", k8s_dir], check=True)
+        self._kubectl_apply_k8s()
 
     # ---- Full Flow ----
 
@@ -295,7 +370,7 @@ class GCPOrchestrator:
                     self.wait_for_vm(timeout=120)
                 self.deploy_code()
                 self.deploy_env()
-                self.deploy_compose()  # pull + build + up
+                self.deploy_compose()
                 self.run_pipeline()
                 self.start_prediction()
                 self.suggest_tunnel()
