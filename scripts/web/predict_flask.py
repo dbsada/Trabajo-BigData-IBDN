@@ -441,110 +441,27 @@ def api_services_status():
         return json_util.dumps({"error": str(e), "services": {}})
     return json_util.dumps({"services": services})
 
-@app.route("/api/logs/<service>")
-def api_service_logs(service):
-    import docker
-    try:
-        client = docker.from_env()
-        container = client.containers.get(service)
-        since = request.args.get('since', 0, type=int)
-        if since > 0:
-            logs = container.logs(timestamps=False)
-        else:
-            tail = 2000 if service == 'flask' else request.args.get('tail', 500, type=int)
-            logs = container.logs(tail=tail, timestamps=False)
-        text = logs.decode('utf-8', errors='replace')
-        if service == 'flask':
-            lines = text.split('\n')
-            lines = [l for l in lines if '/api/logs/' not in l]
-            text = '\n'.join(lines[since:])
-        else:
-            lines = text.split('\n')
-            text = '\n'.join(lines[since:])
-        return json_util.dumps({"logs": text, "service": service, "status": container.status, "total": len(lines)})
-    except docker.errors.NotFound:
-        return json_util.dumps({"error": f"Container {service} not found", "logs": ""}), 404
-    except Exception as e:
-        return json_util.dumps({"error": str(e), "logs": ""}), 500
+import sys, os
+_project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+from utils import Logs
 
 @app.route("/api/logs/all")
 def api_all_logs():
-    import docker, re, glob as glb
-    from datetime import datetime
     db_mode = os.environ.get('DB_MODE', 'cassandra')
-    services = ['kafka', 'spark', 'spark-worker', 'flask', 'minio', 'mlflow']
-    if db_mode == 'mongodb':
-        services.append('mongodb')
-    else:
-        services.append('cassandra')
-    colors = {'kafka':'#9c36b5','spark':'#fdc41b','spark-worker':'#fdc41b','cassandra':'#2f9e44','mongodb':'#2f9e44','flask':'#1971c2','minio':'#e05a5a','mlflow':'#60a5fa'}
-    since = request.args.get('since', 0, type=int)
-    all_lines = []
-    try:
-        client = docker.from_env()
-        for name in services:
-            try:
-                container = client.containers.get(name)
-                if since > 0:
-                    logs = container.logs(timestamps=True)
-                else:
-                    fetch_tail = 400 if name == 'flask' else 250
-                    logs = container.logs(tail=fetch_tail, timestamps=True)
-                text = logs.decode('utf-8', errors='replace')
-                for line in text.split('\n'):
-                    if not line.strip():
-                        continue
-                    if name == 'flask' and '/api/logs/' in line:
-                        continue
-                    ts_match = re.match(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+)Z\s(.*)', line)
-                    if ts_match:
-                        ts_str = ts_match.group(1)[:26]
-                        content = ts_match.group(2)
-                        try:
-                            ts = datetime.strptime(ts_str + 'Z', '%Y-%m-%dT%H:%M:%S.%fZ')
-                        except:
-                            ts = datetime.min
-                        all_lines.append((ts, name, colors.get(name,'#888'), content))
-                    else:
-                        all_lines.append((datetime.min, name, colors.get(name,'#888'), line))
+    result = Logs.get_all_logs(db_mode)
+    return json_util.dumps(result)
 
-                # For spark-worker, also read Spark driver stdout files
-                if name == 'spark-worker':
-                    try:
-                        result = container.exec_run("sh -c 'ls -t /opt/spark/work/driver-*/stdout 2>/dev/null | head -1'")
-                        if result.exit_code == 0 and result.output.strip():
-                            latest_stdout = result.output.decode().strip()
-                            tail_result = container.exec_run(f'tail -200 {latest_stdout}')
-                            if tail_result.exit_code == 0:
-                                driver_text = tail_result.output.decode('utf-8', errors='replace')
-                                for line in driver_text.split('\n'):
-                                    if not line.strip():
-                                        continue
-                                    if line.startswith('[SPARK]'):
-                                        ts = datetime.now()
-                                        content = line
-                                        all_lines.append((ts, 'spark', colors['spark'], content))
-                    except Exception:
-                        pass
-            except docker.errors.NotFound:
-                pass
-        all_lines.sort(key=lambda x: x[0])
-        total = len(all_lines)
-        if since > 0:
-            all_lines = all_lines[since:]
-        available = len(all_lines)
-        all_lines = all_lines[-1000:]
-        if available > 1000:
-            marker = '<div style="text-align:center;padding:2rem;color:#555;font-size:0.8rem">---- ' + str(available - 1000) + ' líneas anteriores omitidas ----</div>\n'
-        else:
-            marker = ''
-        interleaved = []
-        for ts, svc, color, content in all_lines:
-            tag = '<span class="log-service-tag" style="background:'+color+'20;color:'+color+'">'+svc+'</span>'
-            interleaved.append(tag + content)
-        return json_util.dumps({"logs": marker + '\n'.join(interleaved), "interleaved": True, "count": len(interleaved), "total": total})
-    except Exception as e:
-        return json_util.dumps({"error": str(e), "logs": "", "interleaved": False}), 500
+@app.route("/api/logs/<service>")
+def api_service_logs(service):
+    tail = 2000 if service == 'flask' else request.args.get('tail', 500, type=int)
+    result = Logs.get_service_logs(service, tail)
+    if service == 'flask':
+        result["logs"] = '\n'.join(l for l in result["logs"].split('\n') if '/api/logs/' not in l)
+    if "error" in result:
+        return json_util.dumps(result), 404 if "not found" in result["error"].lower() else 500
+    return json_util.dumps(result)
 
 # Setup Kafka
 from kafka import KafkaProducer, KafkaConsumer
@@ -1265,6 +1182,40 @@ def activate_model(run_id):
     return redirect(url_for("models_page"))
   except Exception as e:
     return f"Error activating model: {e}", 500
+
+def _auto_start_prediction():
+    """Start prediction job on Flask boot if there's an active model and no running job."""
+    import boto3
+    from botocore.config import Config
+    def _boot_start():
+        time.sleep(5)  # Wait for Kafka to be ready
+        try:
+            import requests as req
+            r = req.get("http://spark:8080/json/", timeout=3)
+            has_pred = any("FlightDelayPrediction" in a.get("name", "") for a in r.json().get("activeapps", []))
+            if has_pred:
+                print("[BOOT] Prediction job already running, skipping auto-start")
+                return
+        except Exception:
+            pass
+        try:
+            s3 = boto3.client("s3",
+                endpoint_url=MINIO_ENDPOINT,
+                aws_access_key_id=os.getenv("MINIO_ROOT_USER", "admin"),
+                aws_secret_access_key=os.getenv("MINIO_ROOT_PASSWORD", "password"),
+                config=Config(signature_version="s3v4"))
+            marker = s3.get_object(Bucket="lakehouse", Key="models/active_run_id.txt")
+            active = marker["Body"].read().decode().strip()
+            if active:
+                print(f"[BOOT] Active model found ({active[:12]}...), starting prediction job")
+                _restart_prediction_job()
+            else:
+                print("[BOOT] No active model, skipping prediction auto-start")
+        except Exception:
+            print("[BOOT] No active model found, skipping prediction auto-start")
+    threading.Thread(target=_boot_start, daemon=True).start()
+
+_auto_start_prediction()
 
 if __name__ == "__main__":
     socketio.run(

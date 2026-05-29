@@ -246,8 +246,7 @@ function getDropdown(input) {
       <option value="mlflow">MLflow</option>
       <option value="minio">MinIO</option>
     </select>
-    <button class="log-pause-btn" id="log-pause-btn" title="Pause auto-refresh">⏸</button>
-    <button class="log-clear-btn" id="log-clear-btn" title="Clear log display">🗑</button>
+    <button class="log-clear-btn" id="log-clear-btn" title="Clear recent logs">🗑</button>
     <button class="log-close-btn" id="log-panel-close">&times;</button>
   </div>
   <div class="log-panel-body" id="log-panel-body"></div>
@@ -793,10 +792,93 @@ function loadServices() {
 var logsTabLoaded = false;
 var logAutoInterval = null;
 var logPanelOpen = false;
-var logPaused = false;
-var logClearOffset = 0;
-var logTotalCount = 0;
-var logState = { service: null, sizes: {} };
+var shownHashes = new Set();
+var allKnownHashes = new Set();
+var clearBarrier = null;
+var logContainer = null;
+
+function renderLogs(html) {
+  var body = document.getElementById('log-panel-body');
+  var wasAtBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 80;
+
+  if (!html || html.trim() === '') {
+    body.innerHTML = '<div style="text-align:center;padding:2rem;color:#555;font-size:0.8rem">No logs yet</div>';
+    return;
+  }
+
+  if (!logContainer) {
+    logContainer = document.createElement('pre');
+    logContainer.style.cssText = 'margin:0;font:inherit;color:inherit';
+    body.innerHTML = '';
+    body.appendChild(logContainer);
+  }
+
+  logContainer.innerHTML = html;
+
+  if (wasAtBottom) {
+    body.scrollTop = body.scrollHeight;
+  }
+}
+
+function clearLogs() {
+  clearBarrier = new Set(allKnownHashes);
+  shownHashes.clear();
+  if (logContainer) logContainer.innerHTML = '';
+}
+
+function fetchLogs() {
+  var service = document.getElementById('log-service-select').value;
+  var url = service === 'all' ? '/api/logs/all' : '/api/logs/' + service;
+
+  fetch(url).then(function(r) { return r.json(); }).then(function(data) {
+    if (data.error) {
+      document.getElementById('log-panel-body').innerHTML = '<div style="color:#e05a5a">' + data.error + '</div>';
+      return;
+    }
+
+    var html = data.logs || '';
+    if (service === 'all' && data.interleaved) {
+      var temp = document.createElement('div');
+      temp.innerHTML = html;
+      var lines = temp.querySelectorAll('.log-line');
+
+      lines.forEach(function(el) {
+        var h = el.getAttribute('data-hash');
+        if (h) allKnownHashes.add(h);
+      });
+
+      var linesToShow = [];
+      lines.forEach(function(el) {
+        var h = el.getAttribute('data-hash');
+        if (!h) return;
+        if (clearBarrier && clearBarrier.has(h)) return;
+        if (shownHashes.has(h)) return;
+        shownHashes.add(h);
+        linesToShow.push(el.outerHTML);
+      });
+
+      if (!logContainer) {
+        renderLogs(html);
+        lines.forEach(function(el) {
+          var h = el.getAttribute('data-hash');
+          if (h) shownHashes.add(h);
+        });
+      } else if (linesToShow.length > 0) {
+        logContainer.innerHTML += '\n' + linesToShow.join('\n');
+        var body = document.getElementById('log-panel-body');
+        body.scrollTop = body.scrollHeight;
+      }
+    } else {
+      clearBarrier = null;
+      shownHashes.clear();
+      allKnownHashes.clear();
+      renderLogs(html);
+    }
+  }).catch(function() {
+    var body = document.getElementById('log-panel-body');
+    if (!body.textContent) body.innerHTML = '<div style="text-align:center;padding:2rem;color:#e05a5a">Failed to load logs</div>';
+  });
+}
 
 function loadLogsTab() {
   if (logsTabLoaded) return;
@@ -813,11 +895,11 @@ function openLogPanel() {
   document.getElementById('log-panel').classList.add('open');
   document.getElementById('log-toggle-btn').classList.add('visible');
   logPanelOpen = true;
-  logPaused = false;
-  logClearOffset = 0;
-  logTotalCount = 0;
-  document.getElementById('log-pause-btn').textContent = '⏸';
-  logState = { service: null, firstLoad: true };
+  shownHashes.clear();
+  allKnownHashes.clear();
+  clearBarrier = null;
+  logContainer = null;
+  document.getElementById('log-clear-btn').classList.toggle('hidden', document.getElementById('log-service-select').value !== 'all');
   fetchLogs();
   logAutoInterval = setInterval(fetchLogs, 500);
 }
@@ -827,73 +909,6 @@ function closeLogPanel() {
   document.getElementById('log-toggle-btn').classList.remove('visible');
   logPanelOpen = false;
   if (logAutoInterval) { clearInterval(logAutoInterval); logAutoInterval = null; }
-}
-
-function toggleLogPause() {
-  logPaused = !logPaused;
-  document.getElementById('log-pause-btn').textContent = logPaused ? '▶' : '⏸';
-  document.getElementById('log-pause-btn').title = logPaused ? 'Resume auto-refresh' : 'Pause auto-refresh';
-  if (!logPaused) {
-    logState.firstLoad = true;
-    fetchLogs();
-  }
-}
-
-function clearLogs() {
-  logPaused = true;
-  document.getElementById('log-pause-btn').textContent = '▶';
-  document.getElementById('log-panel-body').innerHTML = '<div style="text-align:center;padding:2rem;color:#555;font-size:0.8rem">Logs cleared. Press ▶ to resume.</div>';
-  logClearOffset = logTotalCount;
-  logState.firstLoad = true;
-  console.log('[logs] cleared, offset=' + logClearOffset);
-}
-
-function resumeLogs() {
-  logPaused = false;
-  document.getElementById('log-pause-btn').textContent = '⏸';
-  logState.firstLoad = true;
-  fetchLogs();
-}
-
-function fetchLogs() {
-  if (logPaused) return;
-  var service = document.getElementById('log-service-select').value;
-  var body = document.getElementById('log-panel-body');
-  var url = service === 'all' ? '/api/logs/all' : '/api/logs/' + service;
-  if (logClearOffset > 0) {
-    url += (url.indexOf('?') >= 0 ? '&' : '?') + 'since=' + logClearOffset;
-    console.log('[logs] fetching with since=' + logClearOffset + ' total=' + logTotalCount);
-  }
-
-  var wasAtBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 80;
-  var isFirst = logState && logState.firstLoad;
-
-  fetch(url).then(function(r) { return r.json(); }).then(function(data) {
-    if (data.error) { body.innerHTML = '<div style="color:#e05a5a">' + data.error + '</div>'; return; }
-
-    if (data.total !== undefined) {
-      logTotalCount = data.total;
-    }
-
-    if (service === 'all' && data.interleaved) {
-      body.innerHTML = '';
-      var pre = document.createElement('pre');
-      pre.style.cssText = 'margin:0;font:inherit;color:inherit';
-      pre.innerHTML = data.logs || '';
-      body.appendChild(pre);
-    } else {
-      var lines = (data.logs || '').split('\n');
-      body.innerHTML = '';
-      var pre = document.createElement('pre');
-      pre.style.cssText = 'margin:0;font:inherit;color:inherit';
-      pre.textContent = lines.join('\n');
-      body.appendChild(pre);
-    }
-    if (isFirst) { logState.firstLoad = false; body.scrollTop = body.scrollHeight; }
-    else if (wasAtBottom) { body.scrollTop = body.scrollHeight; }
-  }).catch(function() {
-    if (!body.textContent) body.innerHTML = '<div style="text-align:center;padding:2rem;color:#e05a5a">Failed to load logs</div>';
-  });
 }
 
 function escapeHtml(text) {
@@ -935,12 +950,14 @@ document.addEventListener('mouseup', function() {
 // Event listeners
 document.getElementById('log-panel-close').addEventListener('click', closeLogPanel);
 document.getElementById('log-toggle-btn').addEventListener('click', openLogPanel);
-document.getElementById('log-pause-btn').addEventListener('click', toggleLogPause);
 document.getElementById('log-clear-btn').addEventListener('click', clearLogs);
 document.getElementById('log-service-select').addEventListener('change', function() {
-  logClearOffset = 0;
-  logTotalCount = 0;
-  if (logState) logState.firstLoad = true;
+  shownHashes.clear();
+  allKnownHashes.clear();
+  clearBarrier = null;
+  logContainer = null;
+  var isAll = this.value === 'all';
+  document.getElementById('log-clear-btn').classList.toggle('hidden', !isAll);
   fetchLogs();
 });
 </script>

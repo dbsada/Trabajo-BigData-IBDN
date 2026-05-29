@@ -195,14 +195,11 @@ body {
       }
       .log-panel-header button:hover { background: #3a3a4e; }
       .log-panel-header button.active { background: #2563eb20; border-color: #2563eb; color: #60a5fa; }
-      .log-pause-btn {
-        padding: 0.3rem 0.5rem !important; font-size: 0.85rem !important;
-        min-width: 32px; text-align: center;
-      }
       .log-clear-btn {
         padding: 0.3rem 0.5rem !important; font-size: 0.85rem !important;
         min-width: 32px; text-align: center;
       }
+      .log-clear-btn.hidden { display: none; }
       .log-panel-body {
         height: calc(100% - 44px); overflow-y: auto; padding: 0.5rem 1rem;
         font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
@@ -213,6 +210,8 @@ body {
       .log-panel-body::-webkit-scrollbar-track { background: #16161e; }
       .log-panel-body::-webkit-scrollbar-thumb { background: #3a3a4e; border-radius: 3px; }
       .log-service-tag { display: inline-block; padding: 0 0.3rem; border-radius: 2px; font-weight: 600; font-size: 0.65rem; margin-right: 0.4rem; }
+      .log-time { display: inline-block; color: #555; font-size: 0.65rem; font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; margin-right: 0.5rem; min-width: 52px; }
+      .log-line { display: inline; }
       .log-close-btn {
         margin-left: auto; background: none; border: none; color: #888;
         cursor: pointer; font-size: 1.1rem; padding: 0.2rem;
