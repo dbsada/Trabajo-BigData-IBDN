@@ -1,0 +1,1126 @@
+{% extends "layout.html" %}
+{% block body %}
+  <form id="flight_delay_classification" action="/flights/delays/predict/classify_realtime" method="post">
+    <div class="form-grid">
+      {% for item in form_config %}
+        <div>
+          <label for="{{item['field']}}">{{item.get('label', item['field'])}}</label>
+          {% if item.field == 'Carrier' %}
+          <select name="{{item.field}}">
+            <option value="AA"{% if item.value == 'AA' %} selected{% endif %}>AA - American Airlines</option>
+            <option value="AS"{% if item.value == 'AS' %} selected{% endif %}>AS - Alaska Airlines</option>
+            <option value="B6"{% if item.value == 'B6' %} selected{% endif %}>B6 - JetBlue</option>
+            <option value="DL"{% if item.value == 'DL' %} selected{% endif %}>DL - Delta</option>
+            <option value="EV"{% if item.value == 'EV' %} selected{% endif %}>EV - ExpressJet</option>
+          </select>
+          {% elif item.field in ('Origin','Dest') %}
+          <input name="{{item['field']}}" type="text" value="{{item.get('value', '')}}"
+                 class="ac-airport" placeholder="Airport code" autocomplete="off">
+          {% elif item.type == 'date' %}
+          <input name="{{item['field']}}" type="date" value="{{item.get('value', '')}}">
+          {% elif item.type == 'number' %}
+          <input name="{{item['field']}}" type="number" value="{{item.get('value', '')}}" min="0" max="999">
+          {% else %}
+          <input name="{{item['field']}}" type="text" value="{{item.get('value', '')}}">
+          {% endif %}
+        </div>
+      {% endfor %}
+      <div class="full" style="text-align: right; margin-top: 0.5rem;">
+        <button type="submit" id="predict-btn">Predict</button>
+      </div>
+    </div>
+  </form>
+  <div class="result-box">
+    <svg id="route-svg" viewBox="0 0 240 32" width="100%" style="overflow:visible;margin-bottom:0.75rem">
+      <defs>
+        <marker id="route-arrow" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="5" markerHeight="5" orient="auto">
+          <path d="M0 0 L8 4 L0 8 z" fill="#60a5fa"/>
+        </marker>
+      </defs>
+      <text id="route-origin" x="16" y="20" fill="#e0e0e8" font-size="11" font-family="inherit" font-weight="700" text-anchor="middle" letter-spacing="0.5">ATL</text>
+      <text id="route-dest" x="224" y="20" fill="#e0e0e8" font-size="11" font-family="inherit" font-weight="700" text-anchor="middle" letter-spacing="0.5">SFO</text>
+      <path id="route-path" d="M 30 16 Q 120 -2 200 16" fill="none" stroke="#3a3a4e" stroke-width="2"/>
+      <g id="route-plane" opacity="0">
+        <path d="M0,-3 L5,0 L0,3 L1.5,0 Z" fill="#60a5fa"/>
+        <animateMotion dur="2s" repeatCount="1" fill="freeze" begin="indefinite">
+          <mpath href="#route-path"/>
+        </animateMotion>
+      </g>
+    </svg>
+    <div class="result-label">Delay</div>
+    <div class="result-value" id="result"></div>
+  </div>
+
+<script>
+var AIRPORTS = null;
+
+$(document).on('focus', '.ac-airport', function() {
+  if (!AIRPORTS) {
+    fetch('/api/airports').then(function(r) { return r.json(); }).then(function(d) { AIRPORTS = d; });
+  }
+  showDropdown(this);
+}).on('input', '.ac-airport', function() {
+  showDropdown(this);
+  updateRouteLabels();
+}).on('blur', '.ac-airport', function() {
+  setTimeout(function() { hideDropdown(this); }.bind(this), 200);
+}).on('change', '.ac-airport', function() {
+  updateRouteLabels();
+});
+
+function updateRouteLabels() {
+  var origin = document.querySelector('input[name="Origin"]');
+  var dest = document.querySelector('input[name="Dest"]');
+  var oEl = document.getElementById('route-origin');
+  var dEl = document.getElementById('route-dest');
+  if (oEl && origin) oEl.textContent = origin.value || '---';
+  if (dEl && dest) dEl.textContent = dest.value || '---';
+}
+
+function showDropdown(input) {
+  var dd = getDropdown(input);
+  if (!AIRPORTS) { dd.style.display = 'none'; return; }
+  var val = input.value.toUpperCase();
+  var matches = val ? AIRPORTS.filter(function(a) { return a.indexOf(val) === 0; }) : AIRPORTS;
+  matches = matches.slice(0, 50);
+  if (matches.length === 0 || matches.length === 1 && matches[0] === input.value.toUpperCase()) {
+    dd.style.display = 'none'; return;
+  }
+  dd.innerHTML = matches.map(function(m) {
+    return '<div class="ac-item' + (m === val ? ' ac-sel' : '') + '" data-val="' + m + '">' + m + '</div>';
+  }).join('');
+  dd.style.display = 'block';
+}
+
+function hideDropdown(input) {
+  var dd = getDropdown(input);
+  if (dd) dd.style.display = 'none';
+}
+
+function getDropdown(input) {
+  var dd = input._dd;
+  if (!dd) {
+    dd = document.createElement('div');
+    dd.className = 'ac-dropdown';
+    input.parentNode.appendChild(dd);
+    dd.addEventListener('mousedown', function(e) {
+      var item = e.target.closest('.ac-item');
+      if (item) { input.value = item.dataset.val; hideDropdown(input); $(input).trigger('change'); }
+    });
+    input._dd = dd;
+  }
+  dd.style.cssText = 'left:0;top:' + (input.offsetHeight + 2) + 'px;width:' + input.offsetWidth + 'px';
+  return dd;
+}
+</script>
+{% endblock %}
+
+{% block arch %}
+<div class="arch" id="arch">
+<div class="tab-carousel" id="tab-carousel">
+  <div id="tab-arch" class="tab-panel">
+    <div style="font-size:0.75rem;color:#888;margin-bottom:0.5rem;text-transform:uppercase;letter-spacing:0.5px;font-weight:500">Architecture</div>
+<svg viewBox="0 0 380 380" width="100%" style="overflow:visible">
+  <defs>
+    <marker id="arrow" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" fill="currentColor"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="380" height="380" rx="10" fill="none" stroke="#444" stroke-width="1.5" stroke-dasharray="5,4"/>
+  <text x="14" y="20" fill="#888" font-size="11" font-family="inherit" font-weight="500">{% if DEPLOY_MODE == 'gke' %}Kubernetes{% else %}Docker{% endif %}</text>
+
+  <rect id="sv-spark" x="60" y="48" width="180" height="40" rx="6" fill="#1e1e2a" stroke="#fdc41b" stroke-width="2" class="sv-node"/>
+  <text x="150" y="68" fill="#d0d0d8" font-size="12" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">SPARK</text>
+
+  <rect id="sv-kafka-l" x="70" y="163" width="80" height="36" rx="6" fill="#1e1e2a" stroke="#9c36b5" stroke-width="2" class="sv-node"/>
+  <text x="110" y="181" fill="#d0d0d8" font-size="11" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">KAFKA</text>
+
+  <rect id="sv-kafka-r" x="160" y="163" width="80" height="36" rx="6" fill="#1e1e2a" stroke="#9c36b5" stroke-width="2" class="sv-node"/>
+  <text x="200" y="181" fill="#d0d0d8" font-size="11" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">KAFKA</text>
+
+  <rect x="58" y="150" width="194" height="62" rx="8" fill="none" stroke="#555" stroke-width="1" stroke-dasharray="3,3"/>
+
+  <rect id="sv-bbdd" x="270" y="163" width="80" height="36" rx="6" fill="#1e1e2a" stroke="#2f9e44" stroke-width="2" class="sv-node"/>
+  {% if DB_MODE == 'cassandra' %}
+  <text x="310" y="181" fill="#d0d0d8" font-size="10" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">CASSANDRA</text>
+  {% else %}
+  <text x="310" y="181" fill="#d0d0d8" font-size="11" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">MONGODB</text>
+  {% endif %}
+
+  <rect id="sv-flask" x="60" y="280" width="180" height="40" rx="6" fill="#1e1e2a" stroke="#1971c2" stroke-width="2" class="sv-node"/>
+  <text x="150" y="300" fill="#d0d0d8" font-size="12" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">FLASK</text>
+
+  <rect x="130" y="344" width="120" height="18" rx="4" fill="#1e1e2a" stroke="#2a2a3a" stroke-width="1"/>
+  <rect x="140" y="350" width="7" height="7" rx="2" fill="#60a5fa"/>
+  <text x="153" y="356" fill="#888" font-size="9" font-family="inherit">active</text>
+  <rect x="193" y="350" width="7" height="7" rx="2" fill="#22c55e"/>
+  <text x="206" y="356" fill="#888" font-size="9" font-family="inherit">done</text>
+
+  <g id="sv-a0" class="sv-arrow">
+    <path d="M 110 280 L 110 204" fill="none" stroke-width="5"/>
+    <polygon points="110,198 104,208 116,208"/>
+  </g>
+  <g id="sv-a1" class="sv-arrow">
+    <path d="M 110 163 L 110 93" fill="none" stroke-width="5"/>
+    <polygon points="110,87 104,97 116,97"/>
+  </g>
+  <g id="sv-a2" class="sv-arrow">
+    <path d="M 200 88 L 200 158" fill="none" stroke-width="5"/>
+    <polygon points="200,164 194,154 206,154"/>
+  </g>
+  <g id="sv-a3" class="sv-arrow">
+    <path d="M 240 181 L 270 181" fill="none" stroke-width="5"/>
+    <polygon points="276,181 266,175 266,187"/>
+  </g>
+  <g id="sv-a4" class="sv-arrow">
+    <path d="M 200 199 L 200 275" fill="none" stroke-width="5"/>
+    <polygon points="200,281 194,271 206,271"/>
+  </g>
+</svg>
+</div>
+
+<div id="tab-models" class="tab-panel">
+  <div style="font-size:0.75rem;color:#888;margin-bottom:0.5rem;text-transform:uppercase;letter-spacing:0.5px;font-weight:500">Models</div>
+  <div id="models-loading" style="text-align:center;padding:2rem;color:#555;font-size:0.85rem">Loading models...</div>
+  <div id="models-content" style="display:none"></div>
+
+  <!-- Train modal -->
+  <div id="train-modal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:#00000080;z-index:1000;justify-content:center;align-items:center">
+    <div style="background:#1e1e2a;border:1px solid #2a2a3a;border-radius:10px;padding:1.2rem;width:360px;max-height:90vh;overflow-y:auto">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+        <span style="color:#d0d0d8;font-size:0.9rem;font-weight:600">Train <input type="text" id="model-name-input" value="rf_training" style="background:#16161e;border:1px solid #2a2a3a;color:#d0d0d8;padding:0.15rem 0.4rem;border-radius:4px;font-size:0.85rem;outline:none;width:160px;font-family:inherit;font-weight:600"></span>
+        <span id="modal-close" style="color:#888;cursor:pointer;font-size:1.1rem">&times;</span>
+      </div>
+
+      <label style="display:block;font-size:0.7rem;color:#888;margin-bottom:0.2rem">Trees <span id="trees-val" style="color:#60a5fa;font-weight:600">20</span></label>
+      <input type="range" id="slider-trees" min="1" max="100" value="20" style="width:100%;margin-bottom:0.5rem">
+
+      <label style="display:block;font-size:0.7rem;color:#888;margin-bottom:0.2rem">Max Depth <span id="depth-val" style="color:#60a5fa;font-weight:600">10</span></label>
+      <input type="range" id="slider-depth" min="1" max="30" value="10" style="width:100%;margin-bottom:0.5rem">
+
+      <label style="display:block;font-size:0.7rem;color:#888;margin-bottom:0.2rem">Max Bins <span id="bins-val" style="color:#60a5fa;font-weight:600">4657</span></label>
+      <input type="range" id="slider-bins" min="4200" max="10000" step="100" value="4657" style="width:100%;margin-bottom:0.5rem">
+
+      <label style="display:block;font-size:0.7rem;color:#888;margin-bottom:0.2rem">Max Memory (MB) <span id="mem-val" style="color:#60a5fa;font-weight:600">1024</span></label>
+      <input type="range" id="slider-mem" min="128" max="4096" step="64" value="1024" style="width:100%;margin-bottom:0.75rem">
+
+      <button id="start-train-btn" style="width:100%;background:#2563eb;color:#fff;border:none;padding:0.5rem;border-radius:6px;font-size:0.85rem;font-weight:600;cursor:pointer">Start Training</button>
+    </div>
+  </div>
+</div>
+
+<!-- Pull from Local modal -->
+<div id="pull-modal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:#00000080;z-index:1000;justify-content:center;align-items:center">
+  <div style="background:#1e1e2a;border:1px solid #2a2a3a;border-radius:10px;padding:1.5rem;width:460px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+      <span style="color:#d0d0d8;font-size:0.9rem;font-weight:600">Pull Models from Local</span>
+      <span id="pull-close" style="color:#888;cursor:pointer;font-size:1.1rem">&times;</span>
+    </div>
+    <div style="color:#b0b0b8;font-size:0.8rem;line-height:1.7">
+      {% if DEPLOY_MODE == 'gke' %}
+      <p>To transfer trained models + MLflow DB from your local Docker to this GKE cluster:</p>
+      <pre style="background:#16161e;padding:0.8rem;border-radius:6px;color:#60a5fa;font-size:0.75rem;margin:0.8rem 0;overflow-x:auto">predict models push --gke</pre>
+      <p style="color:#888;font-size:0.7rem">This copies models + MLflow DB from local MinIO to GKE MinIO. Then restart MLflow and activate a model.</p>
+      {% else %}
+      <p>To transfer trained models from your local machine, run this command in your terminal:</p>
+      <pre style="background:#16161e;padding:0.8rem;border-radius:6px;color:#60a5fa;font-size:0.75rem;margin:0.8rem 0;overflow-x:auto">predict models push</pre>
+      <p style="color:#888;font-size:0.7rem">This will copy your locally trained models to this GCloud VM. After the push, activate a model in the Models tab.</p>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{% if DEPLOY_MODE != 'gke' %}
+<div id="tab-services" class="tab-panel">
+  <div style="font-size:0.75rem;color:#888;margin-bottom:0.5rem;text-transform:uppercase;letter-spacing:0.5px;font-weight:500">Services</div>
+  <div id="services-content" style="padding:0.5rem 0"></div>
+</div>
+{% endif %}
+{% if DEPLOY_MODE == 'gke' %}
+<div id="tab-cluster" class="tab-panel">
+  <div style="font-size:0.75rem;color:#888;margin-bottom:0.5rem;text-transform:uppercase;letter-spacing:0.5px;font-weight:500">Cluster</div>
+  <div id="cluster-nodes" style="margin-bottom:0.8rem"></div>
+  <div style="font-size:0.7rem;color:#888;margin-bottom:0.3rem;text-transform:uppercase;letter-spacing:0.3px;">Pods</div>
+  <div id="cluster-pods" style="background:#1e1e2a;border:1px solid #2a2a3a;border-radius:6px;overflow:hidden;font-size:0.75rem"></div>
+</div>
+{% endif %}
+</div>
+
+<div class="tab-dots">
+  <span class="dot active" data-index="0"></span>
+  <span class="dot" data-index="1"></span>
+  {% if DEPLOY_MODE != 'gke' %}<span class="dot" data-index="2"></span>{% endif %}
+  {% if DEPLOY_MODE == 'gke' %}<span class="dot" data-index="3"></span>{% endif %}
+</div>
+</div>
+
+<!-- Log slide-up panel -->
+<div class="log-panel" id="log-panel">
+  <div class="log-resize-handle" id="log-resize-handle"></div>
+  <div class="log-panel-header">
+    <span style="font-size:0.75rem;color:#888;font-weight:500;text-transform:uppercase">Logs</span>
+    <select id="log-service-select">
+      <option value="all">All Services</option>
+      <option value="kafka">Kafka</option>
+      <option value="spark">Spark</option>
+      <option value="spark-worker">Spark Worker</option>
+      {% if DB_MODE == 'cassandra' %}
+      <option value="cassandra">Cassandra</option>
+      {% else %}
+      <option value="mongodb">MongoDB</option>
+      {% endif %}
+      <option value="flask">Flask</option>
+      <option value="mlflow">MLflow</option>
+      <option value="minio">MinIO</option>
+      <option value="airflow-webserver">Airflow WS</option>
+      <option value="airflow-scheduler">Airflow Scheduler</option>
+    </select>
+  </div>
+  <div class="log-panel-body" id="log-panel-body"></div>
+</div>
+<button class="log-toggle-btn" id="log-toggle-btn" title="Toggle log viewer">
+  <span>Logs</span>
+  <span class="arr-up active">
+    <svg viewBox="0 0 24 24"><polyline points="6 15 12 9 18 15"/></svg>
+  </span>
+  <span class="arr-dn">
+    <svg viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+  </span>
+</button>
+
+<script src="https://cdn.socket.io/4.5.0/socket.io.min.js"></script>
+<script>
+const socket = io();
+const archArrows = ['#sv-a0','#sv-a1','#sv-a2','#sv-a3','#sv-a4'];
+const archNodes = ['sv-flask','sv-kafka-l','sv-spark','sv-kafka-r','sv-bbdd','sv-flask'];
+let stepIndex = 0;
+let archTimer = null;
+
+function resetArch() {
+  if (archTimer) { clearTimeout(archTimer); archTimer = null; }
+  stepIndex = 0;
+  archArrows.forEach(function(s) { var e = document.querySelector(s); if (e) { e.classList.remove('s-active','s-done'); } });
+  archNodes.forEach(function(s) { var e = document.getElementById(s); if (e) e.classList.remove('s-active','s-done'); });
+  stopRouteAnimation();
+}
+
+function advanceArch() {
+  var arrowsOn = [[0],[1],[2],[3],[4],[]];
+
+  if (stepIndex > 0) {
+    (arrowsOn[stepIndex - 1] || []).forEach(function(idx) {
+      if (idx < archArrows.length) {
+        var prev = document.querySelector(archArrows[idx]);
+        if (prev) { prev.classList.remove('s-active'); prev.classList.add('s-done'); }
+      }
+    });
+    if (stepIndex - 1 < archNodes.length) {
+      var pn = document.getElementById(archNodes[stepIndex - 1]);
+      if (pn) { pn.classList.remove('s-active'); pn.classList.add('s-done'); }
+    }
+  }
+  (arrowsOn[stepIndex] || []).forEach(function(idx) {
+    if (idx < archArrows.length) {
+      var el = document.querySelector(archArrows[idx]);
+      if (el) el.classList.add('s-active');
+    }
+  });
+  if (stepIndex < archNodes.length) {
+    var n = document.getElementById(archNodes[stepIndex]);
+    if (n) { n.classList.remove('s-done'); n.classList.add('s-active'); }
+  }
+  stepIndex++;
+
+  if (stepIndex < 6) {
+    var delays = [250, 600, 600, 300, 400];
+    archTimer = setTimeout(advanceArch, delays[stepIndex - 1]);
+  } else {
+    archTimer = setTimeout(function() {
+      var f = document.getElementById('sv-flask');
+      if (f) f.classList.remove('s-active');
+    }, 1200);
+  }
+}
+
+function checkActiveModel() {
+  fetch('/api/models').then(function(r) { return r.json(); }).then(function(data) {
+    var btn = document.getElementById('predict-btn');
+    if (!btn) return;
+    btn.disabled = !data.active_run_id;
+    btn.title = data.active_run_id ? '' : 'No active model — train one first in Models tab';
+    if (data.active_run_id) btn.textContent = 'Predict';
+  });
+}
+
+$("#flight_delay_classification").submit(function(event) {
+  event.preventDefault();
+  if ($("#predict-btn").prop('disabled')) return;
+  doPredict();
+});
+var pollTimer = null;
+
+function doPredict() {
+  resetArch();
+  startRouteAnimation();
+  $("#predict-btn").prop('disabled', true).text('Sending...');
+  var posting = $.post($("#flight_delay_classification").attr('action'), $("#flight_delay_classification").serialize());
+  posting.done(function(data) {
+    var response = JSON.parse(data);
+    if (response.status == "OK") {
+      advanceArch();  // Flask
+      socket.emit('subscribe', { id: response.id });
+      setTimeout(function() { advanceArch(); }, 250);  // → Kafka-L
+      $("#result").empty().append("Processing...");
+      (function pollResult() {
+        fetch('/flights/delays/predict/classify_realtime/response/' + response.id).then(function(r) { return r.json(); }).then(function(res) {
+          if (res.status === "OK" && res.prediction) {
+            if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+            handlePredictionResult(res.prediction);
+          } else {
+            pollTimer = setTimeout(pollResult, 2000);
+          }
+        });
+      })();
+    }
+  });
+}
+
+function handlePredictionResult(data) {
+  if (archTimer) { clearTimeout(archTimer); archTimer = null; }
+  (function step() {
+    if (stepIndex >= 6) {
+      renderPage(data);
+      $("#predict-btn").prop('disabled', false).text('Predict');
+      setTimeout(function() { var f = document.getElementById('sv-flask'); if (f) f.classList.remove('s-active'); }, 1200);
+      return;
+    }
+    advanceArch();
+    setTimeout(step, 200);
+  })();
+}
+
+socket.on('saved', function(data) {
+  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  handlePredictionResult(data);
+});
+
+function startRouteAnimation() {
+  var origin = document.querySelector('input[name="Origin"]');
+  var dest = document.querySelector('input[name="Dest"]');
+  var oEl = document.getElementById('route-origin');
+  var dEl = document.getElementById('route-dest');
+  if (oEl && origin) oEl.textContent = origin.value || '---';
+  if (dEl && dest) dEl.textContent = dest.value || '---';
+  var svg = document.getElementById('route-svg');
+  var oldPlane = document.getElementById('route-plane');
+  if (oldPlane) oldPlane.remove();
+  var ns = 'http://www.w3.org/2000/svg';
+  var g = document.createElementNS(ns, 'g');
+  g.id = 'route-plane';
+  var planePath = document.createElementNS(ns, 'path');
+  planePath.setAttribute('d', 'M0,-4 L7,0 L0,4 L2,0 Z');
+  planePath.setAttribute('fill', '#60a5fa');
+  g.appendChild(planePath);
+  var anim = document.createElementNS(ns, 'animateMotion');
+  anim.setAttribute('dur', '1.5s');
+  anim.setAttribute('repeatCount', '1');
+  anim.setAttribute('fill', 'freeze');
+  var mpath = document.createElementNS(ns, 'mpath');
+  mpath.setAttribute('href', '#route-path');
+  anim.appendChild(mpath);
+  g.appendChild(anim);
+  svg.appendChild(g);
+  anim.beginElement();
+}
+
+function stopRouteAnimation() {
+  var plane = document.getElementById('route-plane');
+  if (plane) plane.setAttribute('opacity', '0');
+}
+
+document.addEventListener('DOMContentLoaded', function() { updateRouteLabels(); checkActiveModel(); });
+
+// Carousel dots
+var carousel = document.getElementById('tab-carousel');
+var dots = document.querySelectorAll('.tab-dots .dot');
+
+dots.forEach(function(dot) {
+  dot.addEventListener('click', function() {
+    var targetIdx = parseInt(this.dataset.index);
+    carousel.scrollTo({ left: targetIdx * carousel.clientWidth, behavior: 'smooth' });
+  });
+});
+
+carousel.addEventListener('scroll', function() {
+  var idx = Math.round(this.scrollLeft / this.clientWidth);
+  dots.forEach(function(d, i) { d.classList.toggle('active', i === idx); });
+});
+
+// Load all tabs on page load (only if their containers exist)
+if (document.getElementById('models-content')) loadModels();
+loadServices();
+if (document.getElementById('cluster-nodes')) loadCluster();
+
+function showModelDetail(model, activeRunId) {
+  var overlay = document.getElementById('detail-modal');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'detail-modal';
+    overlay.style.cssText = 'display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:#00000080;z-index:1000;justify-content:center;align-items:center';
+    overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.style.display = 'none'; });
+    document.body.appendChild(overlay);
+  }
+
+  var isActive = model.run_id === activeRunId;
+  var params = model.params || {};
+  var metrics = model.metrics || {};
+  var date = model.start_time && model.start_time > 0 ? new Date(model.start_time).toLocaleString() : '—';
+  var acc = model.status === 'RUNNING' ? '—' : metrics.accuracy !== undefined ? (metrics.accuracy * 100).toFixed(1) + '%' : '—';
+
+  var html = '<div style="background:#1e1e2a;border:1px solid #2a2a3a;border-radius:10px;padding:1.2rem;width:340px;max-height:90vh;overflow-y:auto">';
+  html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.8rem">';
+  html += '<span style="color:#d0d0d8;font-size:0.9rem;font-weight:600">' + (model.run_name || model.run_id.slice(0,8)) + '</span>';
+  html += '<span id="detail-close" style="color:#888;cursor:pointer;font-size:1.1rem">&times;</span>';
+  html += '</div>';
+
+  html += '<div style="font-size:0.8rem;color:#b0b0b8;line-height:1.6">';
+  html += '<div><span style="color:#555">Run ID:</span> ' + model.run_id.slice(0,12) + '</div>';
+  html += '<div><span style="color:#555">Status:</span> ' + model.status + '</div>';
+  if (model.stage && model.stage !== 'None') {
+    var sc = model.stage === 'Production' ? '#22c55e' : model.stage === 'Staging' ? '#60a5fa' : '#555';
+    html += '<div><span style="color:#555">Stage:</span> <span style="color:' + sc + ';font-weight:600">' + model.stage + (model.version ? ' v' + model.version : '') + '</span></div>';
+  }
+  html += '<div><span style="color:#555">Date:</span> ' + date + '</div>';
+  html += '<div style="margin-bottom:0.6rem"><span style="color:#555">Accuracy:</span> <span style="color:#60a5fa;font-weight:600">' + acc + '</span></div>';
+
+  html += '<div style="font-size:0.65rem;color:#555;text-transform:uppercase;letter-spacing:0.3px;margin-bottom:0.3rem">Parameters</div>';
+  html += '<div style="background:#16161e;border-radius:6px;padding:0.5rem 0.7rem;margin-bottom:0.2rem;font-size:0.8rem">';
+  var pkeys = Object.keys(params);
+  if (pkeys.length === 0) {
+    html += '<span style="color:#555">No parameters logged</span>';
+  } else {
+    pkeys.forEach(function(k) {
+      html += '<div><span style="color:#555">' + k + ':</span> ' + params[k] + '</div>';
+    });
+  }
+  html += '</div>';
+
+  if (!isActive && model.status === 'FINISHED') {
+    html += '<button id="detail-activate-btn" data-run="' + model.run_id + '" style="width:100%;background:#2563eb;color:#fff;border:none;padding:0.45rem;border-radius:6px;font-size:0.8rem;font-weight:600;cursor:pointer;margin-top:0.6rem">Activate Model</button>';
+  }
+  html += '</div></div>';
+
+  overlay.innerHTML = html;
+  overlay.style.display = 'flex';
+
+  document.getElementById('detail-close').addEventListener('click', function() { overlay.style.display = 'none'; });
+  var actBtn = document.getElementById('detail-activate-btn');
+  if (actBtn) {
+    actBtn.addEventListener('click', function() {
+      var rid = this.dataset.run;
+      overlay.style.display = 'none';
+      fetch('/api/models/activate/' + rid, { method: 'POST' }).then(function(r) { return r.json(); }).then(function(d) {
+        if (d.error) { alert('Error: ' + d.error); return; }
+        modelsLoaded = false;
+        loadModels();
+        // Prediction job is restarting — poll until ready
+        var btn = document.getElementById('predict-btn');
+        if (btn) { btn.disabled = true; btn.textContent = 'Loading model…'; }
+        (function pollPrediction() {
+          fetch('/api/prediction/status').then(function(r) { return r.json(); }).then(function(s) {
+            if (s.running) { checkActiveModel(); }
+            else { setTimeout(pollPrediction, 3000); }
+          });
+        })();
+      });
+    });
+  }
+}
+
+function updateDeleteBtn() {
+  var checked = document.querySelectorAll('.model-check:checked');
+  var btn = document.getElementById('delete-selected-btn');
+  if (!btn) return;
+  if (checked.length > 0) {
+    btn.style.display = 'inline-block';
+    btn.textContent = 'Delete ' + checked.length + ' selected';
+  } else {
+    btn.style.display = 'none';
+  }
+}
+
+// Models panel
+var modelsLoaded = false;
+function loadModels() {
+  fetch('/api/models').then(function(r) { return r.json(); }).then(function(data) {
+    document.getElementById('models-loading').style.display = 'none';
+    var c = document.getElementById('models-content');
+    c.style.display = 'block';
+
+    var activeLabel = data.active_run_id ? data.active_run_id.slice(0,12) : 'none';
+    var html = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.4rem">';
+    html += '<div style="font-size:0.75rem;color:#888">Active model: <span style="color:#60a5fa;font-weight:600">' + activeLabel + '</span></div>';
+    html += '<div><button id="delete-selected-btn" style="display:none;background:none;color:#e05a5a;border:none;padding:0;font-size:0.7rem;cursor:pointer;font-family:inherit;font-weight:500">Delete selected</button></div>';
+    html += '</div>';
+
+    if (data.models.length === 0) {
+      html += '<table style="width:100%;border-collapse:collapse;font-size:0.8rem">';
+      html += '<thead><tr style="border-bottom:1px solid #2a2a3a">';
+      html += '<th style="padding:0.35rem 0.2rem;width:28px"></th>';
+      html += '<th style="padding:0.35rem 0.5rem;text-align:left;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Name</th>';
+      html += '<th style="padding:0.35rem 0.5rem;text-align:right;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Date</th>';
+      html += '</tr></thead><tbody></tbody></table>';
+      html += '<div style="padding:1rem;text-align:center;color:#555;font-size:0.8rem">No trained models yet. Train one first.</div>';
+    } else {
+      html += '<table style="width:100%;border-collapse:collapse;font-size:0.8rem">';
+      html += '<thead><tr style="border-bottom:1px solid #2a2a3a">';
+      html += '<th style="padding:0.35rem 0.2rem;width:24px;text-align:center"><input type="checkbox" class="model-check" id="select-all-checks"></th>';
+      html += '<th style="padding:0.35rem 0.5rem;text-align:left;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Name</th>';
+      html += '<th style="padding:0.35rem 0.5rem;text-align:right;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Date</th>';
+      html += '</tr></thead><tbody>';
+
+      data.models.forEach(function(m) {
+        var date = m.start_time && m.start_time > 0 ? new Date(m.start_time).toLocaleDateString() : '—';
+        var isActive = m.run_id === data.active_run_id;
+        var stageBadge = '';
+        if (m.stage === 'Production') stageBadge = ' <span style="background:#22c55e20;color:#22c55e;padding:0.1rem 0.35rem;border-radius:3px;font-size:0.65rem;font-weight:600">Production</span>';
+        else if (m.stage === 'Staging') stageBadge = ' <span style="background:#60a5fa20;color:#60a5fa;padding:0.1rem 0.35rem;border-radius:3px;font-size:0.65rem;font-weight:600">Staging</span>';
+        html += '<tr class="model-row" data-run="' + m.run_id + '" style="border-bottom:1px solid #1e1e28">';
+        html += '<td style="padding:0.35rem 0.2rem;text-align:center"><input type="checkbox" class="model-check" data-run="' + m.run_id + '"></td>';
+        html += '<td style="padding:0.35rem 0.5rem;color:#d0d0d8;cursor:pointer" class="model-name">' + (m.run_name || m.run_id.slice(0, 8)) + (m.version ? ' <span style="color:#555;font-size:0.65rem">v' + m.version + '</span>' : '') + (isActive ? ' <span style="color:#22c55e;font-size:0.7rem;font-weight:600">✓</span>' : '') + ' ' + stageBadge + '</td>';
+        html += '<td style="padding:0.35rem 0.5rem;text-align:right;color:#555;cursor:pointer" class="model-name">' + date + '</td>';
+        html += '</tr>';
+      });
+
+      html += '</tbody></table>';
+    }
+
+    html += '<div style="margin-top:0.6rem;display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">';
+    html += '<button id="train-btn" style="background:#2563eb;color:#fff;border:none;padding:0.35rem 0.8rem;border-radius:4px;font-size:0.7rem;cursor:pointer;font-weight:500;white-space:nowrap">Train via Flask</button>';
+    html += '<a href="http://localhost:8085" target="_blank" style="background:#22c55e;color:#fff;padding:0.35rem 0.8rem;border-radius:4px;font-size:0.7rem;text-decoration:none;font-weight:500;white-space:nowrap;display:inline-flex;align-items:center">Airflow</a>';
+    html += '<a href="http://localhost:5003" target="_blank" style="background:#60a5fa;color:#fff;padding:0.35rem 0.8rem;border-radius:4px;font-size:0.7rem;text-decoration:none;font-weight:500;white-space:nowrap;display:inline-flex;align-items:center">MLflow</a>';
+    if (typeof DEPLOY_MODE !== 'undefined' && (DEPLOY_MODE === 'gcloud' || DEPLOY_MODE === 'gke')) {
+      html += '<button id="pull-btn" style="background:#fdc41b;color:#1e1e2a;border:none;padding:0.35rem 0.8rem;border-radius:4px;font-size:0.7rem;cursor:pointer;font-weight:500;white-space:nowrap">Pull from Local</button>';
+    }
+    html += '</div>';
+    html += '<div style="margin-top:0.35rem;font-size:0.65rem;color:#555">Airflow: admin / <span id="airflow-pw" style="color:#888;user-select:all">••••••</span></div>';
+    c.innerHTML = html;
+
+    fetch('/api/airflow/password').then(function(r) { return r.json(); }).then(function(d) {
+      if (d.password) document.getElementById('airflow-pw').textContent = d.password;
+    });
+
+    if (typeof DEPLOY_MODE !== 'undefined' && (DEPLOY_MODE === 'gcloud' || DEPLOY_MODE === 'gke')) {
+      document.getElementById('pull-btn').addEventListener('click', function() {
+        document.getElementById('pull-modal').style.display = 'flex';
+      });
+      document.getElementById('pull-close').addEventListener('click', function() {
+        document.getElementById('pull-modal').style.display = 'none';
+      });
+      document.getElementById('pull-modal').addEventListener('click', function(e) {
+        if (e.target === e.currentTarget) document.getElementById('pull-modal').style.display = 'none';
+      });
+    }
+
+    (function checkTrainStatus() {
+      fetch('/api/models/train/status').then(function(r) { return r.json(); }).then(function(s) {
+        var btn = document.getElementById('train-btn');
+        if (!btn) return;
+        if (s.status === 'running') {
+          btn.disabled = true;
+          btn.style.opacity = '0.5';
+          btn.style.cursor = 'not-allowed';
+          btn.textContent = 'Training…';
+          showTrainingRow(s.elapsed);
+        } else {
+          btn.disabled = false;
+          btn.style.opacity = '1';
+          btn.style.cursor = 'pointer';
+          btn.textContent = 'Train via Flask';
+        }
+      });
+    })();
+
+    c.querySelectorAll('.model-name').forEach(function(cell) {
+      cell.addEventListener('click', function(e) {
+        var row = this.closest('.model-row');
+        var runId = row.dataset.run;
+        var model = data.models.find(function(m) { return m.run_id === runId; });
+        if (model) showModelDetail(model, data.active_run_id);
+      });
+    });
+
+    c.querySelectorAll('.model-check').forEach(function(cb) {
+      cb.addEventListener('change', updateDeleteBtn);
+    });
+
+    var selectAll = document.getElementById('select-all-checks');
+    if (selectAll) {
+      selectAll.addEventListener('change', function() {
+        c.querySelectorAll('.model-check').forEach(function(cb) {
+          cb.checked = selectAll.checked;
+        });
+        updateDeleteBtn();
+      });
+    }
+
+    var delBtn = document.getElementById('delete-selected-btn');
+    if (delBtn) {
+      delBtn.addEventListener('click', function() {
+        var checked = document.querySelectorAll('.model-check:checked');
+        var ids = Array.from(checked).map(function(cb) { return cb.dataset.run; });
+        if (ids.length === 0) return;
+        if (!confirm('Delete ' + ids.length + ' model(s)?')) return;
+        var done = 0;
+        ids.forEach(function(id) {
+          fetch('/api/models/delete/' + id, { method: 'POST' }).then(function(r) { return r.json(); }).then(function(d) {
+            if (d.error) { alert('Error: ' + d.error); return; }
+            done++;
+            if (done === ids.length) {
+              modelsLoaded = false;
+              loadModels();
+              checkActiveModel();
+            }
+          });
+        });
+      });
+    }
+
+    var trainBtn = document.getElementById('train-btn');
+    if (trainBtn) {
+      trainBtn.addEventListener('click', function() {
+        document.getElementById('train-modal').style.display = 'flex';
+      });
+    }
+
+    checkActiveModel();
+  });
+}
+
+// Modal controls
+var modal = document.getElementById('train-modal');
+
+document.getElementById('modal-close').addEventListener('click', function() {
+  modal.style.display = 'none';
+});
+modal.addEventListener('click', function(e) {
+  if (e.target === modal) modal.style.display = 'none';
+});
+
+document.getElementById('slider-trees').addEventListener('input', function() {
+  document.getElementById('trees-val').textContent = this.value;
+});
+document.getElementById('slider-depth').addEventListener('input', function() {
+  document.getElementById('depth-val').textContent = this.value;
+});
+document.getElementById('slider-bins').addEventListener('input', function() {
+  document.getElementById('bins-val').textContent = this.value;
+});
+document.getElementById('slider-mem').addEventListener('input', function() {
+  document.getElementById('mem-val').textContent = this.value;
+});
+
+document.getElementById('start-train-btn').addEventListener('click', function() {
+  var btn = this;
+  btn.disabled = true;
+  btn.textContent = 'Starting...';
+  var hp = {
+    max_bins: parseInt(document.getElementById('slider-bins').value) || 4657,
+    max_memory_mb: parseInt(document.getElementById('slider-mem').value) || 1024,
+    num_trees: parseInt(document.getElementById('slider-trees').value) || 20,
+    max_depth: parseInt(document.getElementById('slider-depth').value) || 10,
+    run_name: document.getElementById('model-name-input').value.trim() || 'rf_training'
+  };
+  fetch('/api/models/train', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(hp) }).then(function(r) { return r.json(); }).then(function(data) {
+    btn.disabled = false;
+    btn.textContent = 'Start Training';
+    if (data.error) { alert('Training error: ' + data.error); return; }
+    if (data.status === 'already_running') { alert('A training job is already running. Check the Models tab.'); return; }
+    modal.style.display = 'none';
+    modelsLoaded = false;
+    loadModels();
+  }).catch(function(err) {
+    btn.disabled = false;
+    btn.textContent = 'Start Training';
+    alert('Training request failed: ' + err);
+  });
+});
+
+var trainingPollTimer = null;
+var trainingTickTimer = null;
+function showTrainingRow(elapsed) {
+  var existing = document.querySelector('.training-row');
+  if (existing && trainingPollTimer) {
+    var ts = existing.querySelector('.train-elapsed');
+    if (ts) ts.textContent = elapsed + 's';
+    return;
+  }
+  if (trainingPollTimer) { clearTimeout(trainingPollTimer); trainingPollTimer = null; }
+  if (trainingTickTimer) { clearInterval(trainingTickTimer); trainingTickTimer = null; }
+
+  var c = document.getElementById('models-content');
+  if (!c) return;
+
+  for (var i = 0; i < c.children.length; i++) {
+    var el = c.children[i];
+    if (el.tagName === 'DIV' && el.textContent.indexOf('No trained models') >= 0) {
+      el.style.display = 'none'; break;
+    }
+  }
+
+  if (!existing) {
+    var tbody = c.querySelector('tbody');
+    if (!tbody) {
+      var tbl = document.createElement('table');
+      tbl.style.cssText = 'width:100%;border-collapse:collapse;font-size:0.8rem';
+      var th = document.createElement('thead');
+      th.innerHTML = '<tr style="border-bottom:1px solid #2a2a3a"><th style="padding:0.35rem 0.2rem;width:24px;text-align:center"><input type="checkbox" class="model-check" id="select-all-checks"></th><th style="padding:0.35rem 0.5rem;text-align:left;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Name</th><th style="padding:0.35rem 0.5rem;text-align:right;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Date</th></tr>';
+      tbody = document.createElement('tbody');
+      tbl.appendChild(th);
+      tbl.appendChild(tbody);
+      c.insertBefore(tbl, c.querySelector('div'));
+    }
+    var html = '<tr class="training-row"><td colspan="3" style="padding:0.5rem;border-top:1px solid #2a2a3a">';
+    html += '<div style="display:flex;align-items:center;gap:0.75rem">';
+    html += '<span style="color:#60a5fa;font-size:0.75rem;white-space:nowrap"><span class="pulse-gear">&#9881;</span> Training</span>';
+    html += '<span class="train-elapsed" style="color:#888;font-size:0.7rem;white-space:nowrap;font-family:monospace">' + elapsed + 's</span>';
+    html += '<a href="#" class="cancel-train-btn" style="color:#e05a5a;font-size:0.7rem;text-decoration:none;white-space:nowrap">Cancel</a>';
+    html += '</div></td></tr>';
+    tbody.insertAdjacentHTML('beforeend', html);
+
+    var cancelBtn = document.querySelector('.cancel-train-btn');
+    if (cancelBtn) {
+      cancelBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        if (!confirm('Cancel training?')) return;
+        fetch('/api/models/train/cancel', { method: 'POST' });
+        if (trainingPollTimer) { clearTimeout(trainingPollTimer); trainingPollTimer = null; }
+        if (trainingTickTimer) { clearInterval(trainingTickTimer); trainingTickTimer = null; }
+        var row = document.querySelector('.training-row');
+        if (row) row.remove();
+        modelsLoaded = false;
+        loadModels();
+      });
+    }
+  } else {
+    var ts = existing.querySelector('.train-elapsed');
+    if (ts) ts.textContent = elapsed + 's';
+  }
+
+  var tick = elapsed;
+  trainingTickTimer = setInterval(function() {
+    tick++;
+    var ts = document.querySelector('.train-elapsed');
+    if (ts) ts.textContent = tick + 's';
+  }, 1000);
+
+  trainingPollTimer = setTimeout(function poll() {
+    fetch('/api/models/train/status').then(function(r) { return r.json(); }).then(function(s) {
+      if (s.status === 'running') {
+        var ts = document.querySelector('.train-elapsed');
+        if (ts) {
+          tick = s.elapsed;
+          ts.textContent = tick + 's';
+        }
+        trainingPollTimer = setTimeout(poll, 2000);
+      } else {
+        if (trainingTickTimer) { clearInterval(trainingTickTimer); trainingTickTimer = null; }
+        var row = document.querySelector('.training-row');
+        if (row) row.remove();
+        var btn = document.getElementById('train-btn');
+        if (btn) {
+          btn.disabled = false;
+          btn.style.opacity = '1';
+          btn.style.cursor = 'pointer';
+          btn.textContent = 'Train via Flask';
+        }
+        modelsLoaded = false;
+        loadModels();
+      }
+    }).catch(function() {
+      trainingPollTimer = setTimeout(poll, 2000);
+    });
+  }, 2000);
+}
+
+var servicesLoaded = false;
+function loadServices() {
+  var c = document.getElementById('services-content');
+  if (!c) return;
+  if (servicesLoaded) return;
+  servicesLoaded = true;
+  c.innerHTML = '<div style="text-align:center;padding:1rem;color:#555;font-size:0.85rem">Loading...</div>';
+  fetch('/api/services/status').then(function(r) { return r.json(); }).then(function(d) {
+    var html = '';
+      var ordered = ['kafka', 'spark', 'spark-worker', 'minio', 'mlflow', 'flask', 'cassandra', 'mongodb'];
+    if (d.services && Object.keys(d.services).length > 0) {
+      ordered.forEach(function(name) {
+        var svc = d.services[name];
+        if (!svc) return;
+        var statusColors = {'running': '#22c55e', 'active': '#22c55e', 'stopped': '#e05a5a', 'inactive': '#e05a5a', 'missing': '#e05a5a'};
+        var isUp = svc.status === 'running' || svc.status === 'active';
+        var dotColor = statusColors[svc.status] || '#e05a5a';
+        html += '<div style="display:flex;align-items:center;gap:0.5rem;padding:0.35rem 0;border-bottom:1px solid #1e1e28">';
+        html += '<span style="width:8px;height:8px;border-radius:50%;background:' + (isUp ? '#22c55e' : '#e05a5a') + ';flex-shrink:0"></span>';
+        html += '<span style="flex:1;color:#d0d0d8;font-size:0.8rem">' + name + '</span>';
+        html += '<span style="color:#888;font-size:0.7rem">' + svc.image + '</span>';
+        html += '<span style="color:' + (isUp ? '#22c55e' : '#e05a5a') + ';font-size:0.7rem;font-weight:500">' + svc.status + '</span>';
+        html += '</div>';
+      });
+      c.innerHTML = html;
+    } else {
+      c.innerHTML = '<div style="text-align:center;padding:1rem;color:#555;font-size:0.85rem">No services found</div>';
+    }
+  }).catch(function() {
+    c.innerHTML = '<div style="text-align:center;padding:1rem;color:#e05a5a;font-size:0.85rem">Failed to load services</div>';
+  });
+}
+
+var clusterLoaded = false;
+function loadCluster() {
+  var nc = document.getElementById('cluster-nodes');
+  var pc = document.getElementById('cluster-pods');
+  if (!nc || !pc) return;
+  fetch('/api/gke/status').then(function(r) { return r.json(); }).then(function(d) {
+    if (d.error) { nc.innerHTML = '<div style="color:#e05a5a;font-size:0.75rem;padding:0.5rem">' + d.error + '</div>'; return; }
+    
+    var html = '<div style="display:flex;gap:0.5rem;flex-wrap:wrap">';
+    d.nodes.forEach(function(n) {
+      var c = n.color || '#6366f1';
+      html += '<div style="background:' + c + '18;border:1px solid ' + c + '40;border-radius:6px;padding:0.5rem 0.8rem;flex:1;min-width:150px">';
+      html += '<div style="display:flex;align-items:center;gap:0.3rem;margin-bottom:0.25rem"><span style="display:inline-block;width:20px;height:6px;border-radius:3px;background:' + c + '"></span><span style="color:' + c + ';font-size:0.75rem;font-weight:700">' + n.short_id + '</span></div>';
+      html += '<div style="color:#a0a0b0;font-size:0.6rem">' + n.instance_type + '</div>';
+      html += '<div style="color:#888;font-size:0.6rem">CPU: ' + n.cpu + ' · Mem: ' + n.memory + '</div>';
+      html += '</div>';
+    });
+    html += '</div>';
+    nc.innerHTML = html || '<div style="color:#555;font-size:0.75rem">No nodes found</div>';
+
+    if (d.pods.length > 0) {
+      // Group spark-worker pods into one row
+      var regular = [], sparkWorkers = [];
+      d.pods.forEach(function(p) {
+        if (p.name.indexOf('spark-worker-') === 0) sparkWorkers.push(p);
+        else regular.push(p);
+      });
+      
+      var table = '<table style="width:100%;border-collapse:collapse"><thead><tr style="border-bottom:1px solid #2a2a3a">';
+      table += '<th style="padding:0.35rem 0.5rem;text-align:left;color:#888;font-weight:500;font-size:0.65rem">Pod</th>';
+      table += '<th style="padding:0.35rem 0.5rem;text-align:center;color:#888;font-weight:500;font-size:0.65rem;width:40px">Node</th>';
+      table += '<th style="padding:0.35rem 0.5rem;text-align:center;color:#888;font-weight:500;font-size:0.65rem;width:45px">Ready</th>';
+      table += '<th style="padding:0.35rem 0.5rem;text-align:center;color:#888;font-weight:500;font-size:0.65rem;width:50px">Status</th>';
+      table += '<th style="padding:0.35rem 0.5rem;text-align:center;color:#888;font-weight:500;font-size:0.65rem;width:35px">Rest</th>';
+      table += '</tr></thead><tbody>';
+      
+      // Spark workers as one line
+      if (sparkWorkers.length > 0) {
+        table += '<tr style="border-bottom:1px solid #1e1e28">';
+        table += '<td style="padding:0.3rem 0.5rem;color:#d0d0d8;font-size:0.7rem">spark-worker</td>';
+        var tags = '<span style="display:inline-flex;gap:2px;flex-wrap:nowrap">';
+        sparkWorkers.forEach(function(p) {
+          var c = p.node_color || '#555';
+          tags += '<span style="display:inline-block;background:' + c + '18;color:' + c + ';border:1px solid ' + c + '40;border-radius:3px;padding:0.05rem 0.3rem;font-size:0.55rem;white-space:nowrap">' + (p.node||'?') + '</span>';
+        });
+        tags += '</span>';
+        table += '<td style="padding:0.3rem 0.5rem;text-align:center">' + tags + '</td>';
+        table += '<td style="padding:0.3rem 0.5rem;text-align:center;color:#888;font-size:0.7rem">' + sparkWorkers.length + '/' + sparkWorkers.length + '</td>';
+        table += '<td style="padding:0.3rem 0.5rem;text-align:center"><span style="color:#22c55e;font-size:0.7rem">Running</span></td>';
+        table += '<td style="padding:0.3rem 0.5rem;text-align:center;color:#555;font-size:0.7rem">' + sparkWorkers.reduce(function(s,p){return s+(p.restarts||0);},0) + '</td>';
+        table += '</tr>';
+      }
+      
+      regular.forEach(function(p) {
+        var sc = p.status === 'Running' ? '#22c55e' : p.status === 'Pending' ? '#fdc41b' : '#e05a5a';
+        var rc = p.restarts > 0 ? '#e05a5a' : '#555';
+        var short = p.name.replace(/-[a-z0-9]+$/, '').replace(/-[a-z0-9]+$/, '').substring(0, 22);
+        var nc = p.node_color || '#555';
+        table += '<tr style="border-bottom:1px solid #1e1e28">';
+        table += '<td style="padding:0.3rem 0.5rem;color:#d0d0d8;font-size:0.7rem">' + short + '</td>';
+        table += '<td style="padding:0.3rem 0.5rem;text-align:center"><span style="display:inline-block;background:' + nc + '18;color:' + nc + ';border:1px solid ' + nc + '40;border-radius:3px;padding:0.05rem 0.3rem;font-size:0.55rem">' + (p.node||'?') + '</span></td>';
+        table += '<td style="padding:0.3rem 0.5rem;text-align:center;color:#888;font-size:0.7rem">' + p.ready + '</td>';
+        table += '<td style="padding:0.3rem 0.5rem;text-align:center;font-size:0.7rem"><span style="color:' + sc + '">' + p.status + '</span></td>';
+        table += '<td style="padding:0.3rem 0.5rem;text-align:center;color:' + rc + ';font-size:0.7rem">' + p.restarts + '</td>';
+        table += '</tr>';
+      });
+      table += '</tbody></table>';
+      pc.innerHTML = table;
+    } else {
+      pc.innerHTML = '<div style="text-align:center;padding:0.5rem;color:#555;font-size:0.75rem">No pods found</div>';
+    }
+  }).catch(function() {
+    nc.innerHTML = '<div style="color:#e05a5a;font-size:0.75rem;padding:0.5rem">Failed to load cluster status</div>';
+    pc.innerHTML = '';
+  });
+}
+
+// Log viewer
+var logAutoInterval = null;
+var logPanelOpen = false;
+var shownHashes = new Set();
+var allKnownHashes = new Set();
+var clearBarrier = null;
+var logContainer = null;
+
+function renderLogs(html) {
+  var body = document.getElementById('log-panel-body');
+  var wasAtBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 80;
+
+  if (!html || html.trim() === '') {
+    body.innerHTML = '<div style="text-align:center;padding:2rem;color:#555;font-size:0.8rem">No logs yet</div>';
+    return;
+  }
+
+  if (!logContainer) {
+    logContainer = document.createElement('pre');
+    logContainer.style.cssText = 'margin:0;font:inherit;color:inherit';
+    body.innerHTML = '';
+    body.appendChild(logContainer);
+  }
+
+  logContainer.innerHTML = html;
+
+  if (wasAtBottom) {
+    body.scrollTop = body.scrollHeight;
+  }
+}
+
+function fetchLogs() {
+  var service = document.getElementById('log-service-select').value;
+  var url = service === 'all' ? '/api/logs/all' : '/api/logs/' + service;
+
+  fetch(url).then(function(r) { return r.json(); }).then(function(data) {
+    if (data.error) {
+      document.getElementById('log-panel-body').innerHTML = '<div style="color:#e05a5a">' + data.error + '</div>';
+      return;
+    }
+
+    var html = data.logs || '';
+    if (service === 'all' && data.interleaved) {
+      var temp = document.createElement('div');
+      temp.innerHTML = html;
+      var lines = temp.querySelectorAll('.log-line');
+
+      lines.forEach(function(el) {
+        var h = el.getAttribute('data-hash');
+        if (h) allKnownHashes.add(h);
+      });
+
+      var linesToShow = [];
+      lines.forEach(function(el) {
+        var h = el.getAttribute('data-hash');
+        if (!h) return;
+        if (clearBarrier && clearBarrier.has(h)) return;
+        if (shownHashes.has(h)) return;
+        shownHashes.add(h);
+        linesToShow.push(el.outerHTML);
+      });
+
+      if (!logContainer) {
+        renderLogs(html);
+        lines.forEach(function(el) {
+          var h = el.getAttribute('data-hash');
+          if (h) shownHashes.add(h);
+        });
+      } else if (linesToShow.length > 0) {
+        logContainer.innerHTML += '\n' + linesToShow.join('\n');
+        var body = document.getElementById('log-panel-body');
+        body.scrollTop = body.scrollHeight;
+      }
+    } else {
+      clearBarrier = null;
+      shownHashes.clear();
+      allKnownHashes.clear();
+      renderLogs(html);
+    }
+  }).catch(function() {
+    var body = document.getElementById('log-panel-body');
+    if (!body.textContent) body.innerHTML = '<div style="text-align:center;padding:2rem;color:#e05a5a">Failed to load logs</div>';
+  });
+}
+
+function openLogPanel() {
+  var panel = document.getElementById('log-panel');
+  panel.classList.add('open');
+  var btn = document.getElementById('log-toggle-btn');
+  btn.classList.add('open');
+  btn.style.bottom = panel.offsetHeight + 'px';
+  btn.querySelector('.arr-up').classList.remove('active');
+  btn.querySelector('.arr-dn').classList.add('active');
+  logPanelOpen = true;
+  shownHashes.clear();
+  allKnownHashes.clear();
+  clearBarrier = null;
+  logContainer = null;
+  fetchLogs();
+  logAutoInterval = setInterval(fetchLogs, 500);
+}
+
+function closeLogPanel() {
+  document.getElementById('log-panel').classList.remove('open');
+  var btn = document.getElementById('log-toggle-btn');
+  btn.classList.remove('open');
+  btn.style.bottom = '0px';
+  btn.querySelector('.arr-up').classList.add('active');
+  btn.querySelector('.arr-dn').classList.remove('active');
+  logPanelOpen = false;
+  if (logAutoInterval) { clearInterval(logAutoInterval); logAutoInterval = null; }
+}
+
+function toggleLogPanel() {
+  if (logPanelOpen) closeLogPanel();
+  else openLogPanel();
+}
+
+function escapeHtml(text) {
+  var div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+// Resize handle
+var resizeHandle = document.getElementById('log-resize-handle');
+var isResizing = false;
+var resizeStartY = 0;
+var resizeStartHeight = 0;
+
+resizeHandle.addEventListener('mousedown', function(e) {
+  isResizing = true;
+  resizeStartY = e.clientY;
+  var panel = document.getElementById('log-panel');
+  resizeStartHeight = panel.offsetHeight;
+  panel.classList.add('resizing');
+  resizeHandle.classList.add('dragging');
+  e.preventDefault();
+});
+
+document.addEventListener('mousemove', function(e) {
+  if (!isResizing) return;
+  var delta = resizeStartY - e.clientY;
+  var newHeight = Math.max(150, Math.min(700, resizeStartHeight + delta));
+  var panel = document.getElementById('log-panel');
+  panel.style.height = newHeight + 'px';
+  if (logPanelOpen) {
+    document.getElementById('log-toggle-btn').style.bottom = newHeight + 'px';
+  }
+});
+
+document.addEventListener('mouseup', function() {
+  if (!isResizing) return;
+  isResizing = false;
+  document.getElementById('log-panel').classList.remove('resizing');
+  resizeHandle.classList.remove('dragging');
+});
+
+// Event listeners
+document.getElementById('log-toggle-btn').addEventListener('click', toggleLogPanel);
+document.getElementById('log-service-select').addEventListener('change', function() {
+  shownHashes.clear();
+  allKnownHashes.clear();
+  clearBarrier = null;
+  logContainer = null;
+  fetchLogs();
+});
+</script>
+<script src="/static/flight_delay_predict_polling.js"></script>
+{% endblock %}

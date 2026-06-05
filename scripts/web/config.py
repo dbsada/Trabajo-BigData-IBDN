@@ -1,0 +1,4 @@
+import os
+
+RECORDS_PER_PAGE = int(os.getenv('RECORDS_PER_PAGE', '15'))
+AIRPLANE_RECORDS_PER_PAGE = int(os.getenv('AIRPLANE_RECORDS_PER_PAGE', '5'))

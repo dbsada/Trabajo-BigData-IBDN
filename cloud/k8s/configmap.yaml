@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ibdn-config
+  namespace: ibdn
+data:
+  KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+  KAFKA_TOPIC: "flight-delay-ml-request"
+  KAFKA_RESPONSE_TOPIC: "flight-delay-ml-response"
+  KAFKA_STATUS_TOPIC: "flight-delay-ml-status"
+  KAFKA_LOCAL_BOOTSTRAP_SERVERS: "localhost:9092"
+  MINIO_ENDPOINT: "http://minio:9000"
+  MINIO_LOCAL_ENDPOINT: "http://localhost:9000"
+  MINIO_ROOT_USER: "admin"
+  MINIO_ROOT_PASSWORD: "password"
+  SPARK_MASTER_URL: "spark://spark-manager:7077"
+  MLFLOW_TRACKING_URI: "http://mlflow:5000"
+  MONGODB_URI: "mongodb://mongodb:27017"
+  MONGODB_DATABASE: "agile_data_science"
+  CASSANDRA_HOST: "cassandra"
+  CASSANDRA_PORT: "9042"
+  DB_MODE: "cassandra"
+  PREDICTION_JAR: "/app/flight_prediction/target/scala-2.13/flight_prediction_2.13-0.1.jar"

@@ -1,0 +1,11 @@
+#cloud-config
+packages:
+  - git
+  - python3-pip
+runcmd:
+  - curl -fsSL https://get.docker.com | sh
+  - systemctl enable docker
+  - systemctl start docker
+  - usermod -aG docker ubuntu
+  - pip3 install boto3 --break-system-packages
+  - echo "VM ready for IBDN deployment"

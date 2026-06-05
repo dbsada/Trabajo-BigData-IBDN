@@ -1,0 +1,69 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cassandra-pvc
+  namespace: ibdn
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: cassandra
+  namespace: ibdn
+spec:
+  serviceName: cassandra
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cassandra
+  template:
+    metadata:
+      labels:
+        app: cassandra
+    spec:
+      containers:
+      - name: cassandra
+        image: cassandra:4.1
+        ports:
+        - containerPort: 9042
+        env:
+        - name: MAX_HEAP_SIZE
+          value: "512M"
+        - name: HEAP_NEWSIZE
+          value: "128M"
+        - name: CASSANDRA_HINTED_HANDOFF_ENABLED
+          value: "false"
+        - name: CASSANDRA_SEEDS
+          value: "cassandra-0.cassandra"
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/cassandra
+        resources:
+          requests:
+            memory: "1Gi"
+          limits:
+            memory: "2Gi"
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cassandra
+  namespace: ibdn
+spec:
+  clusterIP: None
+  selector:
+    app: cassandra
+  ports:
+  - port: 9042

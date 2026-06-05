@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-manager
+  namespace: ibdn
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spark-manager
+  template:
+    metadata:
+      labels:
+        app: spark-manager
+    spec:
+      containers:
+      - name: spark-manager
+        image: europe-west1-docker.pkg.dev/practica-creativa-496014/ibdn/spark:latest
+        ports:
+        - containerPort: 8080
+          name: ui
+        - containerPort: 7077
+          name: rpc
+        env:
+        - name: MLFLOW_TRACKING_URI
+          valueFrom:
+            configMapKeyRef:
+              name: ibdn-config
+              key: MLFLOW_TRACKING_URI
+        resources:
+          requests:
+            memory: "1Gi"
+          limits:
+            memory: "2Gi"
+        command:
+        - /opt/spark/bin/spark-class
+        - org.apache.spark.deploy.master.Master
+        - --host
+        - "0.0.0.0"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-manager
+  namespace: ibdn
+spec:
+  selector:
+    app: spark-manager
+  ports:
+  - name: ui
+    port: 8080
+  - name: rpc
+    port: 7077
+  - name: rest
+    port: 6066

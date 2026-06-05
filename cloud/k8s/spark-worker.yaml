@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-worker
+  namespace: ibdn
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: spark-worker
+  template:
+    metadata:
+      labels:
+        app: spark-worker
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - spark-worker
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - name: spark-worker
+        image: europe-west1-docker.pkg.dev/practica-creativa-496014/ibdn/spark:latest
+        ports:
+        - containerPort: 8081
+        env:
+        - name: SPARK_MASTER
+          valueFrom:
+            configMapKeyRef:
+              name: ibdn-config
+              key: SPARK_MASTER_URL
+        - name: SPARK_WORKER_MEMORY
+          value: "6G"
+        - name: SPARK_WORKER_CORES
+          value: "4"
+        resources:
+          requests:
+            memory: "4Gi"
+          limits:
+            memory: "7Gi"
+        command:
+        - /opt/spark/bin/spark-class
+        - org.apache.spark.deploy.worker.Worker
+        - $(SPARK_MASTER)

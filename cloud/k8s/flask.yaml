@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flask
+  namespace: ibdn
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flask
+  template:
+    metadata:
+      labels:
+        app: flask
+    spec:
+      serviceAccountName: flask-sa
+      containers:
+      - name: flask
+        image: europe-west1-docker.pkg.dev/practica-creativa-496014/ibdn/flask:latest
+        ports:
+        - containerPort: 5001
+        envFrom:
+        - configMapRef:
+            name: ibdn-config
+        env:
+        - name: FLASK_DEBUG
+          value: "1"
+        - name: PROJECT_HOME
+          value: "/app/"
+        - name: SKIP_AUTO_START_PREDICTION
+          value: "1"
+        - name: DEPLOY_MODE
+          value: "gke"
+        - name: FLASK_PORT
+          value: "5001"
+        resources:
+          requests:
+            memory: "256Mi"
+          limits:
+            memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flask
+  namespace: ibdn
+spec:
+  selector:
+    app: flask
+  ports:
+  - port: 5001
