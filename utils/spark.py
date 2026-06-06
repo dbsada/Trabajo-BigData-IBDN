@@ -13,6 +13,16 @@ def s3a_flags(endpoint=None, access_key=None, secret_key=None):
         f"--conf spark.hadoop.fs.s3a.connection.ssl.enabled=false"
     )
 
+def _version_confs():
+    model_ver = os.getenv("MODEL_VERSION", "1.0")
+    bucket_ver = os.getenv("BUCKETIZER_VERSION", "1.0")
+    return [
+        f"spark.driverEnv.MODEL_VERSION={model_ver}",
+        f"spark.driverEnv.BUCKETIZER_VERSION={bucket_ver}",
+        f"spark.executorEnv.MODEL_VERSION={model_ver}",
+        f"spark.executorEnv.BUCKETIZER_VERSION={bucket_ver}",
+    ]
+
 def spark_submit(job_class, jar=None, master=None, deploy_mode="cluster", cores=2, extra_confs=None, extra_java_opts=None):
     master = master or os.getenv("SPARK_MASTER_URL", "spark://spark-manager:7077")
     jar = jar or os.getenv("PREDICTION_JAR", "/app/flight_prediction/target/scala-2.13/flight_prediction_2.13-0.1.jar")
@@ -22,6 +32,8 @@ def spark_submit(job_class, jar=None, master=None, deploy_mode="cluster", cores=
         f"--conf spark.cores.max={cores} "
         f"{s3a_flags()}"
     )
+    for vc in _version_confs():
+        cmd += f" --conf {vc}"
     if extra_java_opts:
         cmd += f' --conf spark.driver.extraJavaOptions={extra_java_opts}'
     if extra_confs:

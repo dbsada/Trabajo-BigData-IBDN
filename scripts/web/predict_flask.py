@@ -33,8 +33,15 @@ KAFKA_TOPIC = os.getenv('KAFKA_TOPIC', 'flight-delay-ml-request')
 KAFKA_RESPONSE_TOPIC = os.getenv('KAFKA_RESPONSE_TOPIC', 'flight-delay-ml-response')
 KAFKA_STATUS_TOPIC = os.getenv('KAFKA_STATUS_TOPIC', 'flight-delay-ml-status')
 
-client = MongoClient(MONGODB_URI)
-db = client[MONGODB_DATABASE]
+_mongo_client = None
+_mongo_db = None
+
+def _get_mongo():
+    global _mongo_client, _mongo_db
+    if _mongo_client is None:
+        _mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=3000)
+        _mongo_db = _mongo_client[MONGODB_DATABASE]
+    return _mongo_db
 
 @app.context_processor
 def inject_arch_info():
@@ -154,7 +161,7 @@ def api_models():
             "run_id": run_id,
             "run_name": info.get("run_name", run_id[:8]),
             "status": info["status"],
-            "start_time": info.get("start_time", 0) or info.get("end_time", 0),
+            "start_time": info.get("start_time", 0) or info.get("end_time", 0) or int(time.time() * 1000),
             "params": params,
             "metrics": metrics,
             "stage": reg.get("stage", "None"),
@@ -212,31 +219,7 @@ def api_activate_model(run_id):
     except Exception as e:
         errors.append(str(e))
 
-    try:
-        resp = req.post(f"{MLFLOW_URI}/api/2.0/mlflow/registered-models/search",
-            json={"max_results": 100}, timeout=5)
-        version = None
-        rm_name = MODEL_NAME
-        for rm in resp.json().get("registered_models", []):
-            rm_name = rm["name"]
-            for mv in rm.get("latest_versions", []):
-                if mv.get("run_id") == run_id:
-                    version = mv["version"]
-                    break
-
-        if version is None:
-            register_resp = req.post(f"{MLFLOW_URI}/api/2.0/mlflow/model-versions/create",
-                json={"name": MODEL_NAME, "source": f"runs:/{run_id}/model"}, timeout=5)
-            if register_resp.status_code == 200:
-                version = register_resp.json().get("model_version", {}).get("version")
-
-        if version:
-            req.post(f"{MLFLOW_URI}/api/2.0/mlflow/model-versions/transition-stage",
-                json={"name": rm_name, "version": str(version), "stage": "Production"}, timeout=5)
-    except Exception:
-        pass
-
-    _restart_prediction_job()
+    threading.Thread(target=_restart_prediction_job, daemon=True).start()
     return json_util.dumps({"ok": True, "active_run_id": run_id, "errors": errors if errors else None})
 
 _pipeline_state_file = '/tmp/pipeline_state.json'
@@ -432,6 +415,8 @@ def _restart_prediction_job():
                         "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
                         "spark.hadoop.fs.s3a.path.style.access": "true",
                         "spark.hadoop.fs.s3a.connection.ssl.enabled": "false",
+                        "spark.driverEnv.MODEL_VERSION": os.getenv("MODEL_VERSION", "1.0"),
+                        "spark.driverEnv.BUCKETIZER_VERSION": os.getenv("BUCKETIZER_VERSION", "1.0"),
                     }
                 }
                 r = req.post("http://spark-manager:6066/v1/submissions/create", json=payload, timeout=10)
@@ -487,6 +472,8 @@ def _restart_prediction_job():
                 f"--conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 "
                 f"--conf spark.hadoop.fs.s3a.path.style.access=true "
                 f"--conf spark.hadoop.fs.s3a.connection.ssl.enabled=false "
+                f"--conf spark.driverEnv.MODEL_VERSION={os.getenv('MODEL_VERSION', '1.0')} "
+                f"--conf spark.driverEnv.BUCKETIZER_VERSION={os.getenv('BUCKETIZER_VERSION', '1.0')} "
                 f"--class es.upm.dit.ging.predictor.MakePrediction "
                 f"{prediction_jar}"
             )
@@ -552,15 +539,16 @@ def api_train_model():
         _last_training["running"] = False
         _last_training["ts"] = _t.time()
 
-        # Kill any stale training apps or resource-hogging apps on Spark
+        # Kill stale apps to free resources for training
         try:
             import requests as req
             r = req.get("http://spark-manager:8080/json/", timeout=3)
             jdata = r.json()
             for app in jdata.get("activeapps", []):
-                if "train_spark_mllib_model" in app.get("name", ""):
+                if any(k in app.get("name", "") for k in ["train_spark_mllib_model", "FlightDelayPrediction"]):
                     app_id = app.get("id", "")
                     req.post("http://spark-manager:8080/app/kill/", data={"id": app_id, "terminate": "true"}, timeout=3)
+                    print(f"[TRAIN] Killed {app.get('name')} ({app_id}) to free resources")
         except Exception:
             pass
 
@@ -592,6 +580,8 @@ def api_train_model():
                     "spark.hadoop.fs.s3a.path.style.access": "true",
                     "spark.hadoop.fs.s3a.connection.ssl.enabled": "false",
                     "spark.driver.extraJavaOptions": "--add-opens=java.base/sun.util.calendar=ALL-UNNAMED",
+                    "spark.driverEnv.MODEL_VERSION": os.getenv("MODEL_VERSION", "1.0"),
+                    "spark.driverEnv.BUCKETIZER_VERSION": os.getenv("BUCKETIZER_VERSION", "1.0"),
                 }
                 app_args = [
                     "--max-bins", str(max_bins),
@@ -660,6 +650,7 @@ def api_train_model():
                 print(f"Training error: {e}")
             finally:
                 api_train_model._training = False
+                _restart_prediction_job()
 
         t = threading.Thread(target=_train, daemon=True)
         t.start()
@@ -675,9 +666,11 @@ _last_training = {"running": False, "elapsed": 0, "ts": 0}
 def api_train_status():
     import requests as req, time as _time
     now = _time.time()
+    is_training = getattr(api_train_model, "_training", False)
     try:
         r = req.get("http://spark-manager:8080/json/", timeout=5)
         data = r.json()
+        # Check active apps first
         for app in data.get("activeapps", []):
             if "train_spark_mllib_model" in app.get("name", ""):
                 state = app.get("state", "")
@@ -687,13 +680,20 @@ def api_train_status():
                 _last_training["elapsed"] = app["duration"] // 1000
                 _last_training["ts"] = now
                 return json_util.dumps({"status": "running", "elapsed": _last_training["elapsed"]})
-        _last_training["running"] = False
-        return json_util.dumps({"status": "idle"})
+        # Check completed apps — training just finished
+        for app in data.get("completedapps", []):
+            if "train_spark_mllib_model" in app.get("name", ""):
+                if is_training:
+                    api_train_model._training = False
+                _last_training["running"] = False
+                _last_training["elapsed"] = app.get("duration", 0) // 1000
+                return json_util.dumps({"status": "completed", "elapsed": _last_training["elapsed"]})
+        # No training app found — if _training flag is set, we're in the gap
+        if is_training and now - _last_training.get("ts", 0) < 120:
+            return json_util.dumps({"status": "running", "elapsed": _last_training.get("elapsed", 0)})
     except Exception:
-        if getattr(api_train_model, "_training", False) and now - _last_training.get("ts", 0) < 60:
-            return json_util.dumps({"status": "running", "elapsed": _last_training["elapsed"]})
-        if now - _last_training.get("ts", 0) < 30 and _last_training.get("running"):
-            return json_util.dumps({"status": "running", "elapsed": _last_training["elapsed"]})
+        if is_training and now - _last_training.get("ts", 0) < 120:
+            return json_util.dumps({"status": "running", "elapsed": _last_training.get("elapsed", 0)})
     _last_training["running"] = False
     return json_util.dumps({"status": "idle"})
 
@@ -866,11 +866,11 @@ def api_gke_scale():
                 import subprocess
                 r = subprocess.run(
                     f"gcloud container clusters resize ibdn-cluster --node-pool default-pool "
-                    f"--num-nodes {replicas} --zone europe-west1-b --project practica-creativa-496014 --quiet 2>&1",
+                    f"--num-nodes {replicas} --zone {os.getenv('GCP_ZONE', 'europe-west1-b')} --project {os.getenv('GCP_PROJECT', 'REPLACE_PROJECT')} --quiet 2>&1",
                     shell=True, capture_output=True, text=True, timeout=60
                 )
                 cmd = (f"gcloud container clusters resize ibdn-cluster --node-pool default-pool "
-                       f"--num-nodes {replicas} --zone europe-west1-b --project practica-creativa-496014 --quiet")
+                       f"--num-nodes {replicas} --zone {os.getenv('GCP_ZONE', 'europe-west1-b')} --project {os.getenv('GCP_PROJECT', 'REPLACE_PROJECT')} --quiet")
                 if r.returncode == 0:
                     return json_util.dumps({"ok": True, "output": f"Node pool resizing to {replicas} nodes (from {node_count})"})
                 err = (r.stdout.strip() + r.stderr.strip())[:300]
@@ -1104,7 +1104,7 @@ def persist_prediction(data):
       ))
     return
 
-  db.flight_delay_ml_response.insert_one(data)
+  _get_mongo().flight_delay_ml_response.insert_one(data)
 
 @socketio.on('subscribe')
 def on_subscribe(data):
@@ -1160,7 +1160,7 @@ def on_time_performance():
   flight_date = request.args.get('FlightDate')
   flight_num = request.args.get('FlightNum')
   
-  flight = db.on_time_performance.find_one({
+  flight = _get_mongo().on_time_performance.find_one({
     'Carrier': carrier,
     'FlightDate': flight_date,
     'FlightNum': flight_num
@@ -1172,7 +1172,7 @@ def on_time_performance():
 @app.route("/flights/<origin>/<dest>/<flight_date>")
 def list_flights(origin, dest, flight_date):
   
-  flights = db.on_time_performance.find(
+  flights = _get_mongo().on_time_performance.find(
     {
       'Origin': origin,
       'Dest': dest,
@@ -1183,7 +1183,7 @@ def list_flights(origin, dest, flight_date):
       ('ArrTime', 1),
     ]
   )
-  flight_count = db.on_time_performance.count_documents({
+  flight_count = _get_mongo().on_time_performance.count_documents({
     'Origin': origin,
     'Dest': dest,
     'FlightDate': flight_date
@@ -1199,7 +1199,7 @@ def list_flights(origin, dest, flight_date):
 # Controller: Fetch a flight table
 @app.route("/total_flights")
 def total_flights():
-  total_flights = db.flights_by_month.find({}, 
+  total_flights = _get_mongo().flights_by_month.find({}, 
     sort = [
       ('Year', 1),
       ('Month', 1)
@@ -1209,7 +1209,7 @@ def total_flights():
 # Serve the chart's data via an asynchronous request (formerly known as 'AJAX')
 @app.route("/total_flights.json")
 def total_flights_json():
-  total_flights = db.flights_by_month.find({}, 
+  total_flights = _get_mongo().flights_by_month.find({}, 
     sort = [
       ('Year', 1),
       ('Month', 1)
@@ -1219,7 +1219,7 @@ def total_flights_json():
 # Controller: Fetch a flight chart
 @app.route("/total_flights_chart")
 def total_flights_chart():
-  total_flights = db.flights_by_month.find({}, 
+  total_flights = _get_mongo().flights_by_month.find({}, 
     sort = [
       ('Year', 1),
       ('Month', 1)
@@ -1265,9 +1265,9 @@ def search_airplanes():
     if value:
       mongo_query[field] = value
 
-  airplanes_cursor = db.airplanes.find(mongo_query).sort('Owner', 1).skip(start).limit(end - start)
+  airplanes_cursor = _get_mongo().airplanes.find(mongo_query).sort('Owner', 1).skip(start).limit(end - start)
   airplanes = list(airplanes_cursor)
-  airplane_count = db.airplanes.count_documents(mongo_query)
+  airplane_count = _get_mongo().airplanes.count_documents(mongo_query)
 
   # Persist search parameters in the form template
   return render_template(
@@ -1283,14 +1283,14 @@ def search_airplanes():
 @app.route("/airplanes/chart/manufacturers.json")
 @app.route("/airplanes/chart/manufacturers.json")
 def airplane_manufacturers_chart():
-  mfr_chart = db.airplane_manufacturer_totals.find_one()
+  mfr_chart = _get_mongo().airplane_manufacturer_totals.find_one()
   return json.dumps(mfr_chart)
 
 # Controller: Fetch a flight and display it
 @app.route("/airplane/<tail_number>")
 @app.route("/airplane/flights/<tail_number>")
 def flights_per_airplane(tail_number):
-  flights = db.flights_per_airplane.find_one(
+  flights = _get_mongo().flights_per_airplane.find_one(
     {'TailNum': tail_number}
   )
   return render_template(
@@ -1302,10 +1302,10 @@ def flights_per_airplane(tail_number):
 # Controller: Fetch an airplane entity page
 @app.route("/airline/<carrier_code>")
 def airline(carrier_code):
-  airline_summary = db.airlines.find_one(
+  airline_summary = _get_mongo().airlines.find_one(
     {'CarrierCode': carrier_code}
   )
-  airline_airplanes = db.airplanes_per_carrier.find_one(
+  airline_airplanes = _get_mongo().airplanes_per_carrier.find_one(
     {'Carrier': carrier_code}
   )
   return render_template(
@@ -1342,7 +1342,7 @@ def index():
 @app.route("/airlines")
 @app.route("/airlines/")
 def airlines():
-  airlines = db.airplanes_per_carrier.find()
+  airlines = _get_mongo().airplanes_per_carrier.find()
   return render_template('all_airlines.html', airlines=airlines)
 
 @app.route("/flights/search")
@@ -1381,14 +1381,14 @@ def search_flights():
   if flight_number:
     mongo_query['FlightNum'] = flight_number
 
-  flights_cursor = db.on_time_performance.find(mongo_query).sort([
+  flights_cursor = _get_mongo().on_time_performance.find(mongo_query).sort([
     ('FlightDate', 1),
     ('DepTime', 1),
     ('Carrier', 1),
     ('FlightNum', 1)
   ]).skip(start).limit(end - start)
   flights = list(flights_cursor)
-  flight_count = db.on_time_performance.count_documents(mongo_query)
+  flight_count = _get_mongo().on_time_performance.count_documents(mongo_query)
 
   # Persist search parameters in the form template
   return render_template(
@@ -1443,7 +1443,7 @@ def regress_flight_delays():
   prediction_features['FlightNum'] = api_form_values['FlightNum']
   
   # Set the derived values
-  prediction_features['Distance'] = predict_utils.get_flight_distance(client, api_form_values['Origin'], api_form_values['Dest'])
+  prediction_features['Distance'] = predict_utils.get_flight_distance(_get_mongo(), api_form_values['Origin'], api_form_values['Dest'])
   
   # Turn the date into DayOfYear, DayOfMonth, DayOfWeek
   date_features_dict = predict_utils.get_regression_date_args(api_form_values['FlightDate'])
@@ -1500,7 +1500,7 @@ def classify_flight_delays():
   
   # Set the derived values
   prediction_features['Distance'] = predict_utils.get_flight_distance(
-    client, api_form_values['Origin'],
+    _get_mongo(), api_form_values['Origin'],
     api_form_values['Dest']
   )
   
@@ -1514,7 +1514,7 @@ def classify_flight_delays():
   # Add a timestamp
   prediction_features['Timestamp'] = predict_utils.get_current_timestamp()
   
-  db.prediction_tasks.insert_one(
+  _get_mongo().prediction_tasks.insert_one(
     prediction_features
   )
   return json_util.dumps(prediction_features)
@@ -1546,7 +1546,7 @@ def flight_delays_batch_results_page(iso_date):
   iso_tomorrow = rounded_tomorrow_dt.isoformat()
   
   # Fetch today's prediction results from Mongo
-  predictions = db.prediction_results.find(
+  predictions = _get_mongo().prediction_results.find(
     {
       'Timestamp': {
         "$gte": iso_today,
@@ -1589,7 +1589,7 @@ def classify_flight_delays_realtime():
   
   # Set the derived values
   prediction_features['Distance'] = predict_utils.get_flight_distance(
-    client, api_form_values['Origin'],
+    _get_mongo(), api_form_values['Origin'],
     api_form_values['Dest']
   )
   
@@ -1666,7 +1666,7 @@ def classify_flight_delays_realtime_response(unique_id):
         })
 
   else:
-    prediction = db.flight_delay_ml_response.find_one({"UUID": unique_id})
+    prediction = _get_mongo().flight_delay_ml_response.find_one({"UUID": unique_id})
     if prediction:
       return json_util.dumps({"status": "OK", "id": unique_id, "prediction": prediction})
 

@@ -181,6 +181,9 @@ project/project/
 .bsp/
 *.sbt
 
+# Precompiled JARs (built from flight_prediction/target/)
+jars/
+
 # logs
 logs/*
 !logs/.gitkeepcloud/__pycache__/

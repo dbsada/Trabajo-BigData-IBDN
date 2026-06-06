@@ -19,33 +19,52 @@ object MakePrediction {
       .getOrCreate()
     import spark.implicits._
 
-    // Load models from S3
     val base_path = "s3a://lakehouse"
-    val arrivalBucketizerPath = "%s/models/arrival_bucketizer_2.0.bin".format(base_path)
+    val envVersion = sys.env.getOrElse("MODEL_VERSION", "1.0")
+    val bucketizerVersion = sys.env.getOrElse("BUCKETIZER_VERSION", "1.0")
+
+    // Read active run ID from MinIO, fall back to env var
+    val modelVersion = try {
+      import org.apache.hadoop.fs.{FileSystem, Path => HPath}
+      val fs = FileSystem.get(new java.net.URI("s3a://lakehouse"), spark.sparkContext.hadoopConfiguration)
+      val p = new HPath("s3a://lakehouse/models/active_run_id.txt")
+      if (fs.exists(p)) {
+        val is = fs.open(p)
+        val id = scala.io.Source.fromInputStream(is).mkString.trim
+        is.close()
+        println(s"[SPARK] Active model from MinIO: $id")
+        id
+      } else {
+        println(s"[SPARK] No active_run_id.txt, using env: $envVersion")
+        envVersion
+      }
+    } catch {
+      case e: Exception =>
+        println(s"[SPARK] Could not read active_run_id.txt, using env: $envVersion (${e.getMessage})")
+        envVersion
+    }
+
+    val arrivalBucketizerPath = s"$base_path/models/arrival_bucketizer_$bucketizerVersion.bin"
     println(s"[SPARK] Loading arrival bucketizer from: $arrivalBucketizerPath")
     val arrivalBucketizer = Bucketizer.load(arrivalBucketizerPath)
-    val columns = Seq("Carrier", "Origin", "Dest", "Route")
 
-    // Load all the string field vectorizer pipelines
+    val columns = Seq("Carrier", "Origin", "Dest", "Route")
     val stringIndexerModel = columns.map { n =>
       val path = s"$base_path/models/string_indexer_model_$n.bin"
       println(s"[SPARK] Loading string indexer: $path")
       StringIndexerModel.load(path)
     }
 
-    // Load the numeric vector assembler
-    val vectorAssemblerPath = "%s/models/numeric_vector_assembler.bin".format(base_path)
+    val vectorAssemblerPath = s"$base_path/models/numeric_vector_assembler.bin"
     println(s"[SPARK] Loading vector assembler from: $vectorAssemblerPath")
     val vectorAssembler = VectorAssembler.load(vectorAssemblerPath)
 
-    // Load the classifier model
-    val randomForestModelPath = "%s/models/spark_random_forest_classifier.flight_delays.5.0.bin".format(base_path)
+    val randomForestModelPath = s"$base_path/models/spark_random_forest_classifier.flight_delays.$modelVersion.bin"
     println(s"[SPARK] Loading RF model from: $randomForestModelPath")
     val rfc = RandomForestClassificationModel.load(randomForestModelPath)
 
     println("[SPARK] All models loaded. Starting Kafka streaming...")
 
-    // Process Prediction Requests in Streaming
     val df = spark
       .readStream
       .format("kafka")
@@ -55,14 +74,13 @@ object MakePrediction {
       .load()
     df.printSchema()
 
-    // Status stream: signals when Spark starts processing a message
     val statusStream = df
       .selectExpr("'status' as key", "'PROCESSING' as value")
       .writeStream
       .format("kafka")
       .option("kafka.bootstrap.servers", "kafka:9092")
       .option("topic", "flight-delay-ml-status")
-      .option("checkpointLocation", "/tmp/spark_checkpoint_status")
+      .option("checkpointLocation", "/opt/spark/checkpoint/spark_checkpoint_status")
       .outputMode("append")
       .start()
 
@@ -76,68 +94,45 @@ object MakePrediction {
       .add("DayOfMonth", DataTypes.IntegerType)
       .add("Dest", DataTypes.StringType)
       .add("DepDelay", DataTypes.DoubleType)
-      .add("Prediction", DataTypes.StringType)
       .add("Timestamp", DataTypes.TimestampType)
       .add("FlightDate", DataTypes.DateType)
       .add("Carrier", DataTypes.StringType)
       .add("UUID", DataTypes.StringType)
       .add("Distance", DataTypes.DoubleType)
-      .add("Carrier_index", DataTypes.DoubleType)
-      .add("Origin_index", DataTypes.DoubleType)
-      .add("Dest_index", DataTypes.DoubleType)
-      .add("Route_index", DataTypes.DoubleType)
 
     val flightNestedDf = flightJsonDf.select(from_json(col("value"), flightStruct).as("flight"))
 
-    val flightFlattenedDf = flightNestedDf.selectExpr(
-      "flight.Origin", "flight.DayOfWeek", "flight.DayOfYear", "flight.DayOfMonth",
+    val flightParsed = flightNestedDf.selectExpr(
+      "flight.Origin", "flight.FlightNum",
+      "flight.DayOfWeek", "flight.DayOfYear", "flight.DayOfMonth",
       "flight.Dest", "flight.DepDelay", "flight.Timestamp", "flight.FlightDate",
       "flight.Carrier", "flight.UUID", "flight.Distance"
     )
 
-    val predictionRequestsWithRouteMod = flightFlattenedDf.withColumn(
-      "Route", concat(flightFlattenedDf("Origin"), lit('-'), flightFlattenedDf("Dest"))
+    val withRoute = flightParsed.withColumn(
+      "Route", concat(col("Origin"), lit('-'), col("Dest"))
     )
 
-    val flightFlattenedDf2 = flightNestedDf.selectExpr(
-      "flight.Origin", "flight.DayOfWeek", "flight.DayOfYear", "flight.DayOfMonth",
-      "flight.Dest", "flight.DepDelay", "flight.Timestamp", "flight.FlightDate",
-      "flight.Carrier", "flight.UUID", "flight.Distance",
-      "flight.Carrier_index", "flight.Origin_index", "flight.Dest_index", "flight.Route_index"
-    )
+    var indexedDf = withRoute
+    for (model <- stringIndexerModel) {
+      indexedDf = model.transform(indexedDf)
+    }
 
-    val predictionRequestsWithRouteMod2 = flightFlattenedDf2.withColumn(
-      "Route", concat(flightFlattenedDf2("Origin"), lit('-'), flightFlattenedDf2("Dest"))
-    )
+    val vectorizedFeatures = vectorAssembler.setHandleInvalid("keep").transform(indexedDf)
 
-    val predictionRequestsWithRoute = stringIndexerModel.map(n => n.transform(predictionRequestsWithRouteMod))
+    val predictions = rfc.transform(vectorizedFeatures)
 
-    val vectorizedFeatures = vectorAssembler.setHandleInvalid("keep").transform(predictionRequestsWithRouteMod2)
-
-    val finalVectorizedFeatures = vectorizedFeatures
-      .drop("Carrier_index")
-      .drop("Origin_index")
-      .drop("Dest_index")
-      .drop("Route_index")
-
-    val predictions = rfc.transform(finalVectorizedFeatures)
-      .drop("Features_vec")
-
-    val finalPredictions = predictions.drop("indices").drop("values").drop("rawPrediction").drop("probability")
-
-    // Write predictions to Kafka response topic
-    val kafkaSink = finalPredictions
+    val kafkaSink = predictions
       .selectExpr("CAST(UUID AS STRING) as key", "to_json(struct(*)) as value")
       .writeStream
       .format("kafka")
       .option("kafka.bootstrap.servers", "kafka:9092")
       .option("topic", "flight-delay-ml-response")
-      .option("checkpointLocation", "/tmp/spark_checkpoint_kafka")
+      .option("checkpointLocation", "/opt/spark/checkpoint/spark_checkpoint_kafka")
       .outputMode("append")
       .start()
 
-    // Logging sink: print each prediction to stdout (visible in Spark driver logs)
-    val loggingSink = finalPredictions.writeStream
+    val loggingSink = predictions.writeStream
       .foreachBatch { (batchDF: DataFrame, batchId: Long) =>
         val rows = batchDF.collect()
         if (rows.nonEmpty) {

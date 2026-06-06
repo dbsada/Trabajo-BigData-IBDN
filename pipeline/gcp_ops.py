@@ -556,19 +556,23 @@ images: ['{image}']
 def substitute_image_refs(cfg):
     project = os.getenv('GCP_PROJECT', '')
     k8s_dir = os.path.join(CLOUD_DIR, "k8s")
+    # Use a temp directory to avoid modifying source files
+    import tempfile
+    tmp_manifests = tempfile.mkdtemp()
     for root, _, files in os.walk(k8s_dir):
         for f in files:
             if f.endswith(('.yaml', '.yml')):
-                path = os.path.join(root, f)
-                with open(path) as fh:
+                src = os.path.join(root, f)
+                with open(src) as fh:
                     content = fh.read().replace('REPLACE_PROJECT', project)
-                with open(path, 'w') as fh:
+                dst = os.path.join(tmp_manifests, f)
+                with open(dst, 'w') as fh:
                     fh.write(content)
+    return tmp_manifests
 
 @sh
-def _kubectl_apply_k8s():
-    k8s_dir = os.path.join(CLOUD_DIR, "k8s")
-    return f"kubectl apply -f {k8s_dir} --validate=false"
+def _kubectl_apply_k8s(manifest_dir):
+    return f"kubectl apply -f {manifest_dir} --validate=false"
 
 
 def deploy_k8s(gcp):
@@ -580,15 +584,17 @@ def deploy_k8s(gcp):
         logging.info("Installing gke-gcloud-auth-plugin...")
         subprocess.run("gcloud components install gke-gcloud-auth-plugin --quiet",
                       shell=True, check=True)
-    substitute_image_refs(gcp)
+    manifest_dir = substitute_image_refs(gcp)
     for attempt in range(3):
-        r = _kubectl_apply_k8s()
+        r = _kubectl_apply_k8s(manifest_dir)
         if r.returncode == 0:
             break
         logging.warning(f"kubectl apply failed (attempt {attempt+1}/3), retrying...")
         time.sleep(10)
     else:
         raise RuntimeError("kubectl apply failed after 3 attempts")
+    import shutil
+    shutil.rmtree(manifest_dir, ignore_errors=True)
     logging.info("Waiting for pods to be ready...")
     subprocess.run(
         "kubectl wait --for=condition=ready pod -l app=flask -n ibdn --timeout=300s",

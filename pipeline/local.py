@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import shlex
 from utils.shell import sh
 from utils.config import load_dotenv
 from config import DeployConfig
@@ -10,7 +11,9 @@ load_dotenv()
 
 @sh
 def run_script(cfg, script_name):
-    return f"{cfg.venv_python} {os.path.join(cfg.project_home, 'scripts', script_name)}"
+    python = shlex.quote(cfg.venv_python)
+    script = shlex.quote(os.path.join(cfg.project_home, 'scripts', script_name))
+    return f"{python} {script}"
 
 def send_progress(step, status, message=""):
     flk_port = os.getenv('FLASK_PORT', '5001')

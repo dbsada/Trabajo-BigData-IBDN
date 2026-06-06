@@ -51,6 +51,10 @@ object TrainModel {
       StructField("Origin", StringType, nullable = true),
     ))
 
+    val defaultVersion = sys.env.getOrElse("MODEL_VERSION", "1.0")
+    val bucketizerVersion = sys.env.getOrElse("BUCKETIZER_VERSION", "1.0")
+    println(s"Using default version: $defaultVersion, bucketizer: $bucketizerVersion")
+
     val inputPath = "s3a://lakehouse/raw/simple_flight_delay_features.jsonl.bz2"
     var features = spark.read.schema(schema).json(inputPath).repartition(4)
     features.first()
@@ -69,7 +73,7 @@ object TrainModel {
       .setInputCol("ArrDelay")
       .setOutputCol("ArrDelayBucket")
 
-    val bucketizerPath = "s3a://lakehouse/models/arrival_bucketizer_2.0.bin"
+    val bucketizerPath = s"s3a://lakehouse/models/arrival_bucketizer_$bucketizerVersion.bin"
     bucketizer.write.overwrite.save(bucketizerPath)
     println(s"Bucketizer saved to $bucketizerPath")
 
@@ -113,9 +117,52 @@ object TrainModel {
 
     val model = rfc.fit(finalVectorized)
 
-    val modelPath = "s3a://lakehouse/models/spark_random_forest_classifier.flight_delays.5.0.bin"
+    val mlflowUri = sys.env.getOrElse("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+    println(s"Logging to MLflow at $mlflowUri")
+
+    var modelVersion = defaultVersion
+    try {
+      import java.net.{HttpURLConnection, URL}
+      import java.io.{BufferedReader, InputStreamReader}
+      import scala.collection.mutable.StringBuilder
+
+      val expUrl = new URL(s"$mlflowUri/api/2.0/mlflow/runs/create")
+      val expConn = expUrl.openConnection().asInstanceOf[HttpURLConnection]
+      expConn.setRequestMethod("POST")
+      expConn.setDoOutput(true)
+      expConn.setRequestProperty("Content-Type", "application/json")
+      val expBody = s"""{"experiment_id":"0","run_name":"$runName","start_time":$startTime,"tags":[{"key":"mlflow.source.type","value":"SCALA"},{"key":"mlflow.source.name","value":"TrainModel"}]}"""
+      expConn.getOutputStream.write(expBody.getBytes("UTF-8"))
+      val expReader = new BufferedReader(new InputStreamReader(expConn.getInputStream))
+      val respBuilder = new StringBuilder
+      var line = expReader.readLine()
+      while (line != null) { respBuilder.append(line); respBuilder.append('\n'); line = expReader.readLine() }
+      expReader.close()
+      val expResp = respBuilder.toString
+      val runId = expResp.split("\"run_id\": \"", 2).lift(1).flatMap(_.split("\"", 2).headOption).getOrElse("")
+      modelVersion = runId
+      println(s"Using run_id as model version: $modelVersion")
+    } catch {
+      case e: Exception => println(s"MLflow create run failed (non-fatal): ${e.getMessage}")
+    }
+
+    val modelPath = s"s3a://lakehouse/models/spark_random_forest_classifier.flight_delays.$modelVersion.bin"
     model.write.overwrite.save(modelPath)
     println(s"Model saved to $modelPath")
+
+    // Write active_run_id.txt to MinIO
+    try {
+      import org.apache.hadoop.fs.{FileSystem, Path => HPath}
+      val hadoopConf = spark.sparkContext.hadoopConfiguration
+      val fs = FileSystem.get(new java.net.URI("s3a://lakehouse"), hadoopConf)
+      val activePath = new HPath("s3a://lakehouse/models/active_run_id.txt")
+      val os = fs.create(activePath, true)
+      os.write(modelVersion.getBytes("UTF-8"))
+      os.close()
+      println(s"Active run ID written: $modelVersion")
+    } catch {
+      case e: Exception => println(s"Active run ID write error (non-fatal): ${e.getMessage}")
+    }
 
     val predictions = model.transform(finalVectorized)
     val evaluator = new MulticlassClassificationEvaluator()
@@ -132,44 +179,25 @@ object TrainModel {
     val duration = (System.currentTimeMillis() - startTime) / 1000
     println(s"Training completed in ${duration}s, accuracy = $accuracy")
 
-    // MLflow tracking via REST API
-    val mlflowUri = sys.env.getOrElse("MLFLOW_TRACKING_URI", "http://mlflow:5000")
-    println(s"Logging to MLflow at $mlflowUri")
+    // Log params + metrics + finish in MLflow
     try {
       import java.net.{HttpURLConnection, URL}
       import java.io.{BufferedReader, InputStreamReader}
       import scala.collection.mutable.StringBuilder
 
-      // Create run
-      val expUrl = new URL(s"$mlflowUri/api/2.0/mlflow/runs/create")
-      val expConn = expUrl.openConnection().asInstanceOf[HttpURLConnection]
-      expConn.setRequestMethod("POST")
-      expConn.setDoOutput(true)
-      expConn.setRequestProperty("Content-Type", "application/json")
-      val expBody = s"""{"experiment_id":"0","run_name":"$runName","tags":[{"key":"mlflow.source.type","value":"SCALA"},{"key":"mlflow.source.name","value":"TrainModel"}]}"""
-      expConn.getOutputStream.write(expBody.getBytes("UTF-8"))
-      val expReader = new BufferedReader(new InputStreamReader(expConn.getInputStream))
-      val respBuilder = new StringBuilder
-      var line = expReader.readLine()
-      while (line != null) { respBuilder.append(line); respBuilder.append('\n'); line = expReader.readLine() }
-      expReader.close()
-      val expResp = respBuilder.toString
-      val runId = expResp.split("\"run_id\": \"", 2).lift(1).flatMap(_.split("\"", 2).headOption).getOrElse("")
-
-      // Log params + metrics + finish in one batch
       val batchUrl = new URL(s"$mlflowUri/api/2.0/mlflow/runs/log-batch")
       val batchConn = batchUrl.openConnection().asInstanceOf[HttpURLConnection]
       batchConn.setRequestMethod("POST")
       batchConn.setDoOutput(true)
       batchConn.setRequestProperty("Content-Type", "application/json")
       val batchBody = s"""{
-        "run_id":"$runId",
+        "run_id":"$modelVersion",
         "params":[
           {"key":"maxBins","value":"$maxBins"},
           {"key":"maxMemoryInMB","value":"$maxMemoryMB"},
           {"key":"numTrees","value":"$numTrees"},
           {"key":"maxDepth","value":"$maxDepth"},
-          {"key":"model_version","value":"5.0"},
+          {"key":"model_version","value":"$modelVersion"},
           {"key":"training_duration_seconds","value":"$duration"}
         ],
         "metrics":[
@@ -178,9 +206,8 @@ object TrainModel {
       }"""
       batchConn.getOutputStream.write(batchBody.getBytes("UTF-8"))
       val batchCode = batchConn.getResponseCode
-      if (batchCode == 200) {
-        batchConn.getInputStream.close()
-      } else {
+      if (batchCode == 200) batchConn.getInputStream.close()
+      else {
         val errReader = new BufferedReader(new InputStreamReader(batchConn.getErrorStream))
         val errBuilder = new StringBuilder
         var el = errReader.readLine()
@@ -189,17 +216,15 @@ object TrainModel {
         println(s"MLflow log-batch failed ($batchCode): ${errBuilder.toString}")
       }
 
-      // Finish run
       val finishUrl = new URL(s"$mlflowUri/api/2.0/mlflow/runs/update")
       val finishConn = finishUrl.openConnection().asInstanceOf[HttpURLConnection]
       finishConn.setRequestMethod("POST")
       finishConn.setDoOutput(true)
       finishConn.setRequestProperty("Content-Type", "application/json")
-      finishConn.getOutputStream.write(s"""{"run_id":"$runId","status":"FINISHED"}""".getBytes("UTF-8"))
+      finishConn.getOutputStream.write(s"""{"run_id":"$modelVersion","status":"FINISHED"}""".getBytes("UTF-8"))
       val finishCode = finishConn.getResponseCode
-      if (finishCode == 200) {
-        finishConn.getInputStream.close()
-      } else {
+      if (finishCode == 200) finishConn.getInputStream.close()
+      else {
         val errReader = new BufferedReader(new InputStreamReader(finishConn.getErrorStream))
         val errBuilder = new StringBuilder
         var el = errReader.readLine()
@@ -208,7 +233,7 @@ object TrainModel {
         println(s"MLflow finish failed ($finishCode): ${errBuilder.toString}")
       }
 
-      println(s"MLflow run $runId finished, accuracy = $accuracy, duration = ${duration}s")
+      println(s"MLflow run $modelVersion finished, accuracy = $accuracy, duration = ${duration}s")
     } catch {
       case e: Exception => println(s"MLflow logging error (non-fatal): ${e.getMessage}")
     }

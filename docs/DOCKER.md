@@ -44,9 +44,6 @@ Si lo que quieres es entrenar un modelo lo más rápido posible, configura `TREE
 
 ![Docker Training](../images/docker-training.png)
 
-> [!WARNING]
-> Es posible que el proceso de entrenamiento no se muestre automáticamente en la interfaz. Es un bug que no se ha podido solucionar. Espera unos segundos y recarga la página. No trates de entrenar un nuevo modelo mientras el anterior se está entrenando.
-
 Para activar el modelo, haz click encima de él y después pulsa el botón *Activate*:
 
 <table>

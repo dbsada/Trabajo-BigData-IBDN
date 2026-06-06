@@ -47,7 +47,7 @@ gcloud config set project YOUR_PROJECT_ID # Reemplaza YOUR_PROJECT_ID con tu ID 
 ```
 
 ## Iniciar la aplicación:
-Se ha creado un CLI personalizado llamado `predict` (configurado con el comando `pip install -e .`) para facilitar el despliegue de la aplicación de predicción de retrasos de vuelos en diferentes entornos. Este CLI abstrae los detalles de configuración y despliegue, permitiendo ejecutar comandos simples para iniciar la aplicación.
+Se ha creado un CLI personalizado llamado `predict` para facilitar el despliegue de la aplicación de predicción de retrasos de vuelos en diferentes entornos. Este CLI abstrae los detalles de configuración y despliegue, permitiendo ejecutar comandos simples para iniciar la aplicación.
 
 ```shell
 predict docker   # Para desplegar localmente con Docker Compose

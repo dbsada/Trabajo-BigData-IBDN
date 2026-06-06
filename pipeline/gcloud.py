@@ -215,15 +215,15 @@ def run_pipeline_gke(cfg):
         ]:
             console.print(f"  {label}...")
             subprocess.run(cmd, shell=True, timeout=300)
-        # Upload data to MinIO
+        # Upload data to MinIO — use kubectl exec directly (no docker cp, no pod/ prefix)
         for fname in ["simple_flight_delay_features.jsonl.bz2", "origin_dest_distances.jsonl"]:
             subprocess.run(
                 f"kubectl exec -n ibdn deploy/minio -- mkdir -p /tmp/data 2>/dev/null; "
-                f"kubectl cp data/{fname} ibdn/$(kubectl get pod -n ibdn -l app=minio -o name | head -1):/tmp/data/ 2>/dev/null; "
+                f"kubectl exec -n ibdn deploy/flask -- sh -c 'cat /app/data/{fname}' | "
+                f"kubectl exec -n ibdn -i deploy/minio -- sh -c 'cat > /tmp/data/{fname}' 2>/dev/null; "
                 f"kubectl exec -n ibdn deploy/minio -- mc cp /tmp/data/{fname} local/lakehouse/raw/ 2>/dev/null; true",
                 shell=True, timeout=60
             )
-        subprocess.run(f"{kexec} python3 /app/scripts/import_distances.py 2>/dev/null; true", shell=True, timeout=60)
         # Create Kafka topics
         for topic in ["flight-delay-ml-request", "flight-delay-ml-response", "flight-delay-ml-status"]:
             subprocess.run(
@@ -233,37 +233,36 @@ def run_pipeline_gke(cfg):
             )
         console.print("[dim]Data pipeline complete.[/dim]")
 
-        # Import distances to Cassandra (separate due to complex piping)
+        # Import distances to Cassandra — uses inline script reading from pod filesystem
         console.print("  Importing distance data to Cassandra...")
-        subprocess.run(
-            f"kubectl exec -n ibdn deploy/cassandra -- cqlsh -e "
-            f"\"CREATE KEYSPACE IF NOT EXISTS agile_data_science WITH replication = {{'class': 'SimpleStrategy', 'replication_factor': 1}}\" "
-            f"2>/dev/null; true",
-            shell=True, timeout=30
-        )
         IMPORT_SCRIPT = (
-            "import json,sys;"
+            "import json;"
             "from cassandra.cluster import Cluster;"
             "c=Cluster(['cassandra'],port=9042);s=c.connect();"
+            "s.execute(\"CREATE KEYSPACE IF NOT EXISTS agile_data_science WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}\");"
             "s.set_keyspace('agile_data_science');"
             "s.execute('CREATE TABLE IF NOT EXISTS origin_dest_distances (origin text,dest text,distance double,PRIMARY KEY(origin,dest))');"
             "s.execute('TRUNCATE origin_dest_distances');"
+            "s.execute('CREATE TABLE IF NOT EXISTS agile_data_science.flight_delay_ml_response ("
+            "uuid text PRIMARY KEY, prediction int, origin text, dest text, dep_delay double, "
+            "carrier text, flight_date text, flight_num text, distance double, route text, "
+            "day_of_year int, day_of_month int, day_of_week int, timestamp text)');"
             "n=0;"
-            "for l in sys.stdin:"
-            " r=json.loads(l);"
-            " s.execute('INSERT INTO origin_dest_distances(origin,dest,distance)VALUES(%s,%s,%s)',(r['Origin'],r['Dest'],r['Distance']));"
-            " n+=1;"
+            "with open('/app/data/origin_dest_distances.jsonl') as f:"
+            " for line in f:"
+            "  r=json.loads(line);"
+            "  s.execute('INSERT INTO origin_dest_distances(origin,dest,distance)VALUES(%s,%s,%s)',(r['Origin'],r['Dest'],r['Distance']));"
+            "  n+=1;"
             "print(f'{n} records')"
         )
-        distances_file = os.path.join(cfg.project_home, "data/origin_dest_distances.jsonl")
-        if os.path.exists(distances_file):
-            with open(distances_file) as f:
-                r = subprocess.run(
-                    ["kubectl", "exec", "-n", "ibdn", "-i", "deploy/flask", "--", "python3", "-c", IMPORT_SCRIPT],
-                    input=f.read(), capture_output=True, text=True, timeout=60
-                )
-                if r.returncode == 0:
-                    print(f"    {r.stdout.strip()}")
+        r = subprocess.run(
+            ["kubectl", "exec", "-n", "ibdn", "deploy/flask", "--", "python3", "-c", IMPORT_SCRIPT],
+            capture_output=True, text=True, timeout=120
+        )
+        if r.returncode == 0:
+            print(f"    {r.stdout.strip()}")
+        else:
+            print(f"    [yellow]Import issue: {r.stderr.strip()[:200]}[/yellow]")
         console.print("[dim]Distances imported.[/dim]")
 
         # Check if a trained model exists before starting prediction
@@ -285,6 +284,9 @@ def run_pipeline_gke(cfg):
             "--conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem "
             "--conf spark.hadoop.fs.s3a.path.style.access=true "
             "--conf spark.hadoop.fs.s3a.connection.ssl.enabled=false "
+            "--conf spark.executorEnv.MLFLOW_TRACKING_URI=http://mlflow:5000 "
+            "--conf spark.driverEnv.MODEL_VERSION=1.0 "
+            "--conf spark.driverEnv.BUCKETIZER_VERSION=1.0 "
             "--class es.upm.dit.ging.predictor.MakePrediction "
             "/app/flight_prediction/target/scala-2.13/flight_prediction_2.13-0.1.jar",
             shell=True

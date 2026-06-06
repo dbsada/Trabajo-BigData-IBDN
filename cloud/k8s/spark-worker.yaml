@@ -27,7 +27,7 @@ spec:
               topologyKey: kubernetes.io/hostname
       containers:
       - name: spark-worker
-        image: europe-west1-docker.pkg.dev/practica-creativa-496014/ibdn/spark:latest
+        image: europe-west1-docker.pkg.dev/REPLACE_PROJECT/ibdn/spark:latest
         ports:
         - containerPort: 8081
         env:

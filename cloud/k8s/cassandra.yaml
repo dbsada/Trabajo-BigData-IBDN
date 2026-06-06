@@ -42,11 +42,27 @@ spec:
         volumeMounts:
         - name: data
           mountPath: /var/lib/cassandra
-        resources:
-          requests:
-            memory: "1Gi"
-          limits:
-            memory: "2Gi"
+          startupProbe:
+            exec:
+              command: ["cqlsh", "-e", "DESCRIBE KEYSPACES"]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 20
+          livenessProbe:
+            exec:
+              command: ["nodetool", "status"]
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          readinessProbe:
+            exec:
+              command: ["cqlsh", "-e", "DESCRIBE KEYSPACES"]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          resources:
+            requests:
+              memory: "1Gi"
+            limits:
+              memory: "2Gi"
   volumeClaimTemplates:
   - metadata:
       name: data

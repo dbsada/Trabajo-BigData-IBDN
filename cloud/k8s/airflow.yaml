@@ -79,7 +79,7 @@ spec:
     spec:
       initContainers:
       - name: init
-        image: europe-west1-docker.pkg.dev/practica-creativa-496014/ibdn/airflow:latest
+        image: europe-west1-docker.pkg.dev/REPLACE_PROJECT/ibdn/airflow:latest
         command: ["bash", "-c"]
         args:
         - |
@@ -98,7 +98,7 @@ spec:
           value: "postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow"
       containers:
       - name: webserver
-        image: europe-west1-docker.pkg.dev/practica-creativa-496014/ibdn/airflow:latest
+        image: europe-west1-docker.pkg.dev/REPLACE_PROJECT/ibdn/airflow:latest
         ports:
         - containerPort: 8080
         env:
@@ -160,7 +160,7 @@ spec:
     spec:
       containers:
       - name: scheduler
-        image: europe-west1-docker.pkg.dev/practica-creativa-496014/ibdn/airflow:latest
+        image: europe-west1-docker.pkg.dev/REPLACE_PROJECT/ibdn/airflow:latest
         env:
         - name: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN
           value: "postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow"

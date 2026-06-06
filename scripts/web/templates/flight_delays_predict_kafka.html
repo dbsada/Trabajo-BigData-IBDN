@@ -47,12 +47,27 @@
         </animateMotion>
       </g>
     </svg>
-    <div class="result-label">Delay</div>
-    <div class="result-value" id="result"></div>
+    <div class="result-label">Predictions</div>
+    <div class="result-value" id="result-list"></div>
   </div>
 
 <script>
 var AIRPORTS = null;
+var _lastFormValues = null;
+
+function _formChanged() {
+  var f = document.getElementById('flight_delay_classification');
+  if (!f) return true;
+  var vals = {};
+  ['Origin','Dest','Carrier','DepDelay','FlightDate','FlightNum'].forEach(function(n) {
+    var el = f.elements[n];
+    if (el) vals[n] = el.value;
+  });
+  var key = JSON.stringify(vals);
+  if (!_lastFormValues) { _lastFormValues = key; return false; }
+  if (key !== _lastFormValues) { _lastFormValues = key; return true; }
+  return false;
+}
 
 $(document).on('focus', '.ac-airport', function() {
   if (!AIRPORTS) {
@@ -343,13 +358,15 @@ function advanceArch() {
   }
 }
 
+var _isTraining = false;
 function checkActiveModel() {
   fetch('/api/models').then(function(r) { return r.json(); }).then(function(data) {
     var btn = document.getElementById('predict-btn');
     if (!btn) return;
-    btn.disabled = !data.active_run_id;
-    btn.title = data.active_run_id ? '' : 'No active model — train one first in Models tab';
-    if (data.active_run_id) btn.textContent = 'Predict';
+    btn.disabled = !data.active_run_id || _isTraining;
+    btn.title = _isTraining ? 'Training in progress — predictions paused' : (data.active_run_id ? '' : 'No active model — train one first in Models tab');
+    if (_isTraining) btn.textContent = 'Training\u2026';
+    else if (data.active_run_id) btn.textContent = 'Predict';
   });
 }
 
@@ -371,7 +388,12 @@ function doPredict() {
       advanceArch();  // Flask
       socket.emit('subscribe', { id: response.id });
       setTimeout(function() { advanceArch(); }, 250);  // → Kafka-L
-      $("#result").empty().append("Processing...");
+      if (_formChanged()) {
+        var rl = document.getElementById('result-list');
+        if (rl) rl.innerHTML = '';
+      }
+      var rl = document.getElementById('result-list');
+      if (rl) rl.insertAdjacentHTML('afterbegin', '<div class="proc" style="padding:0.4rem 0;color:#555;font-size:0.7rem">Processing…</div>');
       (function pollResult() {
         fetch('/flights/delays/predict/classify_realtime/response/' + response.id).then(function(r) { return r.json(); }).then(function(res) {
           if (res.status === "OK" && res.prediction) {
@@ -441,6 +463,67 @@ function stopRouteAnimation() {
 
 document.addEventListener('DOMContentLoaded', function() { updateRouteLabels(); checkActiveModel(); });
 
+function _activateModel(runId) {
+  if (_isTraining) return;
+  var btn = document.getElementById('predict-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Activating\u2026'; }
+  fetch('/api/models/activate/' + runId, { method: 'POST' }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.error) { alert('Error: ' + d.error); return; }
+    modelsLoaded = false;
+    loadModels();
+    if (btn) { btn.disabled = true; btn.textContent = 'Loading model\u2026'; }
+    (function pollPrediction() {
+      fetch('/api/prediction/status').then(function(r) { return r.json(); }).then(function(s) {
+        if (s.running) { checkActiveModel(); }
+        else { setTimeout(pollPrediction, 3000); }
+      });
+    })();
+  });
+}
+
+function _showContextMenu(x, y, runId, isActive, model, activeRunId) {
+  var existing = document.getElementById('ctx-menu');
+  if (existing) existing.remove();
+  var menu = document.createElement('div');
+  menu.id = 'ctx-menu';
+  menu.style.cssText = 'position:fixed;top:' + y + 'px;left:' + x + 'px;background:#1e1e2a;border:1px solid #2a2a3a;border-radius:6px;padding:0.25rem 0;z-index:2000;min-width:120px;box-shadow:0 8px 24px rgba(0,0,0,0.4)';
+  if (!isActive) {
+    var actItem = document.createElement('div');
+    actItem.textContent = 'Activate';
+    actItem.style.cssText = 'padding:0.4rem 0.8rem;font-size:0.75rem;color:#d0d0d8;cursor:pointer';
+    actItem.addEventListener('mouseenter', function() { this.style.background = '#2a2a3a'; });
+    actItem.addEventListener('mouseleave', function() { this.style.background = ''; });
+    actItem.addEventListener('click', function() { menu.remove(); _activateModel(runId); });
+    menu.appendChild(actItem);
+  }
+  var infoItem = document.createElement('div');
+  infoItem.textContent = 'Details';
+  infoItem.style.cssText = 'padding:0.4rem 0.8rem;font-size:0.75rem;color:#d0d0d8;cursor:pointer';
+  infoItem.addEventListener('mouseenter', function() { this.style.background = '#2a2a3a'; });
+  infoItem.addEventListener('mouseleave', function() { this.style.background = ''; });
+  infoItem.addEventListener('click', function() { menu.remove(); if (model) showModelDetail(model, activeRunId); });
+  menu.appendChild(infoItem);
+  var delItem = document.createElement('div');
+  delItem.textContent = 'Delete';
+  delItem.style.cssText = 'padding:0.4rem 0.8rem;font-size:0.75rem;color:#e05a5a;cursor:pointer;border-top:1px solid #2a2a3a;margin-top:0.15rem';
+  delItem.addEventListener('mouseenter', function() { this.style.background = '#2a2a3a'; });
+  delItem.addEventListener('mouseleave', function() { this.style.background = ''; });
+  delItem.addEventListener('click', function() {
+    menu.remove();
+    if (!confirm('Delete model ' + runId.slice(0,12) + '?')) return;
+    fetch('/api/models/delete/' + runId, { method: 'POST' }).then(function(r) { return r.json(); }).then(function(d) {
+      if (d.error) { alert('Error: ' + d.error); return; }
+      modelsLoaded = false;
+      loadModels();
+      checkActiveModel();
+    });
+  });
+  menu.appendChild(delItem);
+  document.body.appendChild(menu);
+  function closeMenu(e) { if (!menu.contains(e.target)) { menu.remove(); document.removeEventListener('click', closeMenu); } }
+  setTimeout(function() { document.addEventListener('click', closeMenu); }, 10);
+}
+
 // Carousel dots
 var carousel = document.getElementById('tab-carousel');
 var dots = document.querySelectorAll('.tab-dots .dot');
@@ -456,6 +539,16 @@ carousel.addEventListener('scroll', function() {
   var idx = Math.round(this.scrollLeft / this.clientWidth);
   dots.forEach(function(d, i) { d.classList.toggle('active', i === idx); });
 });
+
+// Format helpers
+function fmtDate(ts) {
+  if (!ts || ts == 0) return '—';
+  var d = new Date(ts);
+  if (isNaN(d.getTime())) return '—';
+  return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+}
+function fmtPct(v) { return v !== undefined && v !== null ? (v * 100).toFixed(1) + '%' : '—'; }
+function fmtDur(s) { return s ? parseInt(s) + 's' : '—'; }
 
 // Load all tabs on page load (only if their containers exist)
 if (document.getElementById('models-content')) loadModels();
@@ -475,8 +568,9 @@ function showModelDetail(model, activeRunId) {
   var isActive = model.run_id === activeRunId;
   var params = model.params || {};
   var metrics = model.metrics || {};
-  var date = model.start_time && model.start_time > 0 ? new Date(model.start_time).toLocaleString() : '—';
+  var date = fmtDate(model.start_time);
   var acc = model.status === 'RUNNING' ? '—' : metrics.accuracy !== undefined ? (metrics.accuracy * 100).toFixed(1) + '%' : '—';
+  var dur = params.training_duration_seconds ? params.training_duration_seconds + 's' : '—';
 
   var html = '<div style="background:#1e1e2a;border:1px solid #2a2a3a;border-radius:10px;padding:1.2rem;width:340px;max-height:90vh;overflow-y:auto">';
   html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.8rem">';
@@ -492,6 +586,7 @@ function showModelDetail(model, activeRunId) {
     html += '<div><span style="color:#555">Stage:</span> <span style="color:' + sc + ';font-weight:600">' + model.stage + (model.version ? ' v' + model.version : '') + '</span></div>';
   }
   html += '<div><span style="color:#555">Date:</span> ' + date + '</div>';
+  html += '<div><span style="color:#555">Duration:</span> <span style="color:#b0b0b8">' + dur + '</span></div>';
   html += '<div style="margin-bottom:0.6rem"><span style="color:#555">Accuracy:</span> <span style="color:#60a5fa;font-weight:600">' + acc + '</span></div>';
 
   html += '<div style="font-size:0.65rem;color:#555;text-transform:uppercase;letter-spacing:0.3px;margin-bottom:0.3rem">Parameters</div>';
@@ -507,7 +602,9 @@ function showModelDetail(model, activeRunId) {
   html += '</div>';
 
   if (!isActive && model.status === 'FINISHED') {
-    html += '<button id="detail-activate-btn" data-run="' + model.run_id + '" style="width:100%;background:#2563eb;color:#fff;border:none;padding:0.45rem;border-radius:6px;font-size:0.8rem;font-weight:600;cursor:pointer;margin-top:0.6rem">Activate Model</button>';
+    var actStyle = _isTraining ? 'opacity:0.4;cursor:not-allowed' : 'cursor:pointer';
+    var actText = _isTraining ? 'Training\u2026' : 'Activate Model';
+    html += '<button id="detail-activate-btn" data-run="' + model.run_id + '" style="width:100%;background:#2563eb;color:#fff;border:none;padding:0.45rem;border-radius:6px;font-size:0.8rem;font-weight:600;margin-top:0.6rem;' + actStyle + '">' + actText + '</button>';
   }
   html += '</div></div>';
 
@@ -518,15 +615,18 @@ function showModelDetail(model, activeRunId) {
   var actBtn = document.getElementById('detail-activate-btn');
   if (actBtn) {
     actBtn.addEventListener('click', function() {
+      if (_isTraining) return;
       var rid = this.dataset.run;
       overlay.style.display = 'none';
       fetch('/api/models/activate/' + rid, { method: 'POST' }).then(function(r) { return r.json(); }).then(function(d) {
         if (d.error) { alert('Error: ' + d.error); return; }
+        var btn = document.getElementById('predict-btn');
+        if (btn) {
+          btn.disabled = true;
+          btn.textContent = 'Loading model\u2026';
+        }
         modelsLoaded = false;
         loadModels();
-        // Prediction job is restarting — poll until ready
-        var btn = document.getElementById('predict-btn');
-        if (btn) { btn.disabled = true; btn.textContent = 'Loading model…'; }
         (function pollPrediction() {
           fetch('/api/prediction/status').then(function(r) { return r.json(); }).then(function(s) {
             if (s.running) { checkActiveModel(); }
@@ -539,14 +639,25 @@ function showModelDetail(model, activeRunId) {
 }
 
 function updateDeleteBtn() {
-  var checked = document.querySelectorAll('.model-check:checked');
+  var allCbs = document.querySelectorAll('.model-check:checked');
+  var checked = Array.from(allCbs).filter(function(c) { return c.id !== 'select-all-checks'; });
+  var allCb = document.getElementById('select-all-checks');
+  if (allCb) {
+    var modelCbs = document.querySelectorAll('.model-check:not(#select-all-checks)');
+    var checkedCount = Array.from(modelCbs).filter(function(c) { return c.checked; }).length;
+    allCb.checked = modelCbs.length > 0 && checkedCount === modelCbs.length;
+    allCb.indeterminate = checkedCount > 0 && checkedCount < modelCbs.length;
+  }
   var btn = document.getElementById('delete-selected-btn');
   if (!btn) return;
+  var legend = document.getElementById('acc-legend');
   if (checked.length > 0) {
-    btn.style.display = 'inline-block';
+    btn.style.display = 'inline';
     btn.textContent = 'Delete ' + checked.length + ' selected';
+    if (legend) legend.style.display = 'none';
   } else {
     btn.style.display = 'none';
+    if (legend) legend.style.display = '';
   }
 }
 
@@ -561,7 +672,15 @@ function loadModels() {
     var activeLabel = data.active_run_id ? data.active_run_id.slice(0,12) : 'none';
     var html = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.4rem">';
     html += '<div style="font-size:0.75rem;color:#888">Active model: <span style="color:#60a5fa;font-weight:600">' + activeLabel + '</span></div>';
-    html += '<div><button id="delete-selected-btn" style="display:none;background:none;color:#e05a5a;border:none;padding:0;font-size:0.7rem;cursor:pointer;font-family:inherit;font-weight:500">Delete selected</button></div>';
+    html += '<div style="display:flex;align-items:center;gap:0.3rem;font-size:0.6rem;color:#555">';
+    html += '<span id="acc-legend">';
+    html += '<span style="color:#22c55e">●</span>≥85%';
+    html += '<span style="color:#84cc16">●</span>≥70%';
+    html += '<span style="color:#eab308">●</span>≥50%';
+    html += '<span style="color:#ef4444">●</span>&lt;50%';
+    html += '</span>';
+    html += '<button id="delete-selected-btn" style="display:none;background:none;color:#e05a5a;border:none;padding:0;font-size:0.7rem;cursor:pointer;font-family:inherit;font-weight:500">Delete selected</button>';
+    html += '</div>';
     html += '</div>';
 
     if (data.models.length === 0) {
@@ -569,6 +688,8 @@ function loadModels() {
       html += '<thead><tr style="border-bottom:1px solid #2a2a3a">';
       html += '<th style="padding:0.35rem 0.2rem;width:28px"></th>';
       html += '<th style="padding:0.35rem 0.5rem;text-align:left;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Name</th>';
+      html += '<th style="padding:0.35rem 0.5rem;text-align:right;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Acc</th>';
+      html += '<th style="padding:0.35rem 0.5rem;text-align:right;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Time</th>';
       html += '<th style="padding:0.35rem 0.5rem;text-align:right;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Date</th>';
       html += '</tr></thead><tbody></tbody></table>';
       html += '<div style="padding:1rem;text-align:center;color:#555;font-size:0.8rem">No trained models yet. Train one first.</div>';
@@ -577,18 +698,32 @@ function loadModels() {
       html += '<thead><tr style="border-bottom:1px solid #2a2a3a">';
       html += '<th style="padding:0.35rem 0.2rem;width:24px;text-align:center"><input type="checkbox" class="model-check" id="select-all-checks"></th>';
       html += '<th style="padding:0.35rem 0.5rem;text-align:left;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Name</th>';
+      html += '<th style="padding:0.35rem 0.5rem;text-align:right;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Acc</th>';
+      html += '<th style="padding:0.35rem 0.5rem;text-align:right;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Time</th>';
       html += '<th style="padding:0.35rem 0.5rem;text-align:right;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Date</th>';
       html += '</tr></thead><tbody>';
 
       data.models.forEach(function(m) {
-        var date = m.start_time && m.start_time > 0 ? new Date(m.start_time).toLocaleDateString() : '—';
+        var date = fmtDate(m.start_time);
+        var acc = m.status === 'RUNNING' ? '…' : fmtPct(m.metrics ? m.metrics.accuracy : undefined);
+        var dur = m.params ? fmtDur(m.params.training_duration_seconds) : '—';
         var isActive = m.run_id === data.active_run_id;
         var stageBadge = '';
         if (m.stage === 'Production') stageBadge = ' <span style="background:#22c55e20;color:#22c55e;padding:0.1rem 0.35rem;border-radius:3px;font-size:0.65rem;font-weight:600">Production</span>';
         else if (m.stage === 'Staging') stageBadge = ' <span style="background:#60a5fa20;color:#60a5fa;padding:0.1rem 0.35rem;border-radius:3px;font-size:0.65rem;font-weight:600">Staging</span>';
-        html += '<tr class="model-row" data-run="' + m.run_id + '" style="border-bottom:1px solid #1e1e28">';
+        html += '<tr class="model-row" data-run="' + m.run_id + '" data-active="' + isActive + '" style="border-bottom:1px solid #1e1e28">';
         html += '<td style="padding:0.35rem 0.2rem;text-align:center"><input type="checkbox" class="model-check" data-run="' + m.run_id + '"></td>';
         html += '<td style="padding:0.35rem 0.5rem;color:#d0d0d8;cursor:pointer" class="model-name">' + (m.run_name || m.run_id.slice(0, 8)) + (m.version ? ' <span style="color:#555;font-size:0.65rem">v' + m.version + '</span>' : '') + (isActive ? ' <span style="color:#22c55e;font-size:0.7rem;font-weight:600">✓</span>' : '') + ' ' + stageBadge + '</td>';
+        var accColor = '#555';
+        if (acc !== '—' && acc !== '…') {
+          var pct = parseFloat(acc);
+          if (pct >= 85) accColor = '#22c55e';
+          else if (pct >= 70) accColor = '#84cc16';
+          else if (pct >= 50) accColor = '#eab308';
+          else accColor = '#ef4444';
+        }
+        html += '<td style="padding:0.35rem 0.5rem;text-align:right;color:' + accColor + ';font-weight:600;font-size:0.75rem">' + acc + '</td>';
+        html += '<td style="padding:0.35rem 0.5rem;text-align:right;color:#555">' + dur + '</td>';
         html += '<td style="padding:0.35rem 0.5rem;text-align:right;color:#555;cursor:pointer" class="model-name">' + date + '</td>';
         html += '</tr>';
       });
@@ -628,38 +763,74 @@ function loadModels() {
         var btn = document.getElementById('train-btn');
         if (!btn) return;
         if (s.status === 'running') {
+          _isTraining = true;
           btn.disabled = true;
           btn.style.opacity = '0.5';
           btn.style.cursor = 'not-allowed';
           btn.textContent = 'Training…';
-          showTrainingRow(s.elapsed);
+          showTrainingRow(s.elapsed || 0);
+          checkActiveModel();
         } else {
+          _isTraining = false;
           btn.disabled = false;
           btn.style.opacity = '1';
           btn.style.cursor = 'pointer';
           btn.textContent = 'Train via Flask';
+          checkActiveModel();
         }
+      }).catch(function() {
+        _isTraining = false;
+        checkActiveModel();
       });
     })();
+    if (_pendingTrainingRow) {
+      _pendingTrainingRow = false;
+      _isTraining = true;
+      showTrainingRow(0);
+      checkActiveModel();
+    }
 
     c.querySelectorAll('.model-name').forEach(function(cell) {
       cell.addEventListener('click', function(e) {
+        if (e.target.type === 'checkbox') return;
         var row = this.closest('.model-row');
         var runId = row.dataset.run;
+        var isActive = row.dataset.active === 'true';
+        if (isActive) {
+          var model = data.models.find(function(m) { return m.run_id === runId; });
+          if (model) showModelDetail(model, data.active_run_id);
+        } else {
+          _activateModel(runId);
+        }
+      });
+    });
+    c.querySelectorAll('.model-row').forEach(function(row) {
+      row.addEventListener('contextmenu', function(e) {
+        e.preventDefault();
+        var runId = this.dataset.run;
+        var isActive = this.dataset.active === 'true';
         var model = data.models.find(function(m) { return m.run_id === runId; });
-        if (model) showModelDetail(model, data.active_run_id);
+        _showContextMenu(e.clientX, e.clientY, runId, isActive, model, data.active_run_id);
       });
     });
 
     c.querySelectorAll('.model-check').forEach(function(cb) {
-      cb.addEventListener('change', updateDeleteBtn);
+      cb.addEventListener('change', function() {
+        var row = this.closest('.model-row');
+        if (row) row.style.background = this.checked ? 'rgba(37,99,235,0.1)' : '';
+        updateDeleteBtn();
+      });
     });
 
     var selectAll = document.getElementById('select-all-checks');
     if (selectAll) {
       selectAll.addEventListener('change', function() {
-        c.querySelectorAll('.model-check').forEach(function(cb) {
-          cb.checked = selectAll.checked;
+        var modelCbs = c.querySelectorAll('.model-check:not(#select-all-checks)');
+        var anyUnchecked = Array.from(modelCbs).some(function(cb) { return !cb.checked; });
+        modelCbs.forEach(function(cb) {
+          cb.checked = anyUnchecked;
+          var row = cb.closest('.model-row');
+          if (row) row.style.background = anyUnchecked ? 'rgba(37,99,235,0.1)' : '';
         });
         updateDeleteBtn();
       });
@@ -695,6 +866,10 @@ function loadModels() {
     }
 
     checkActiveModel();
+  }).catch(function() {
+    document.getElementById('models-loading').style.display = 'none';
+    var c = document.getElementById('models-content');
+    if (c) c.innerHTML = '<div style="padding:1rem;text-align:center;color:#e05a5a;font-size:0.8rem">Failed to load models</div>';
   });
 }
 
@@ -739,7 +914,14 @@ document.getElementById('start-train-btn').addEventListener('click', function() 
     if (data.status === 'already_running') { alert('A training job is already running. Check the Models tab.'); return; }
     modal.style.display = 'none';
     modelsLoaded = false;
+    _pendingTrainingRow = true;
     loadModels();
+    setTimeout(function() {
+      if (_pendingTrainingRow) {
+        _pendingTrainingRow = false;
+        showTrainingRow(0);
+      }
+    }, 1000);
   }).catch(function(err) {
     btn.disabled = false;
     btn.textContent = 'Start Training';
@@ -747,17 +929,23 @@ document.getElementById('start-train-btn').addEventListener('click', function() 
   });
 });
 
+function formatDuration(s) {
+  var m = Math.floor(s / 60);
+  var sec = s % 60;
+  return m + 'm ' + (sec < 10 ? '0' : '') + sec + 's';
+}
+var _pendingTrainingRow = false;
 var trainingPollTimer = null;
-var trainingTickTimer = null;
-function showTrainingRow(elapsed) {
+function showTrainingRow(elapsed, progress) {
   var existing = document.querySelector('.training-row');
   if (existing && trainingPollTimer) {
-    var ts = existing.querySelector('.train-elapsed');
-    if (ts) ts.textContent = elapsed + 's';
+    if (elapsed > 0) {
+      var ts = existing.querySelector('.train-elapsed');
+      if (ts) ts.innerHTML = formatDuration(elapsed);
+    }
     return;
   }
   if (trainingPollTimer) { clearTimeout(trainingPollTimer); trainingPollTimer = null; }
-  if (trainingTickTimer) { clearInterval(trainingTickTimer); trainingTickTimer = null; }
 
   var c = document.getElementById('models-content');
   if (!c) return;
@@ -770,74 +958,65 @@ function showTrainingRow(elapsed) {
   }
 
   if (!existing) {
-    var tbody = c.querySelector('tbody');
-    if (!tbody) {
-      var tbl = document.createElement('table');
-      tbl.style.cssText = 'width:100%;border-collapse:collapse;font-size:0.8rem';
-      var th = document.createElement('thead');
-      th.innerHTML = '<tr style="border-bottom:1px solid #2a2a3a"><th style="padding:0.35rem 0.2rem;width:24px;text-align:center"><input type="checkbox" class="model-check" id="select-all-checks"></th><th style="padding:0.35rem 0.5rem;text-align:left;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Name</th><th style="padding:0.35rem 0.5rem;text-align:right;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Date</th></tr>';
-      tbody = document.createElement('tbody');
-      tbl.appendChild(th);
-      tbl.appendChild(tbody);
-      c.insertBefore(tbl, c.querySelector('div'));
-    }
-    var html = '<tr class="training-row"><td colspan="3" style="padding:0.5rem;border-top:1px solid #2a2a3a">';
-    html += '<div style="display:flex;align-items:center;gap:0.75rem">';
-    html += '<span style="color:#60a5fa;font-size:0.75rem;white-space:nowrap"><span class="pulse-gear">&#9881;</span> Training</span>';
-    html += '<span class="train-elapsed" style="color:#888;font-size:0.7rem;white-space:nowrap;font-family:monospace">' + elapsed + 's</span>';
-    html += '<a href="#" class="cancel-train-btn" style="color:#e05a5a;font-size:0.7rem;text-decoration:none;white-space:nowrap">Cancel</a>';
-    html += '</div></td></tr>';
-    tbody.insertAdjacentHTML('beforeend', html);
+    var bar = document.createElement('div');
+    bar.className = 'training-row';
+    bar.style.cssText = 'display:flex;align-items:center;gap:0.75rem;padding:0.5rem 0;border-top:1px solid #2a2a3a';
+    bar.innerHTML = '<span style="color:#60a5fa;font-size:0.75rem;white-space:nowrap"><span class="pulse-gear">&#9881;</span> Training</span> <span class="train-elapsed" style="color:#555;font-size:0.7rem;white-space:nowrap;font-family:monospace">' + (elapsed > 0 ? formatDuration(elapsed) : '<span style="color:#555;animation:pulse 1.5s ease-in-out infinite">starting\u2026</span>') + '</span> <a href="#" class="cancel-train-btn" style="color:#e05a5a;font-size:0.7rem;text-decoration:none;white-space:nowrap">Cancel</a>';
+    c.appendChild(bar);
 
-    var cancelBtn = document.querySelector('.cancel-train-btn');
+    var cancelBtn = bar.querySelector('.cancel-train-btn');
     if (cancelBtn) {
       cancelBtn.addEventListener('click', function(e) {
         e.preventDefault();
         if (!confirm('Cancel training?')) return;
         fetch('/api/models/train/cancel', { method: 'POST' });
         if (trainingPollTimer) { clearTimeout(trainingPollTimer); trainingPollTimer = null; }
-        if (trainingTickTimer) { clearInterval(trainingTickTimer); trainingTickTimer = null; }
         var row = document.querySelector('.training-row');
         if (row) row.remove();
+        _isTraining = false;
         modelsLoaded = false;
         loadModels();
       });
     }
   } else {
     var ts = existing.querySelector('.train-elapsed');
-    if (ts) ts.textContent = elapsed + 's';
+    if (elapsed > 0 && ts) ts.textContent = formatDuration(elapsed);
   }
 
-  var tick = elapsed;
-  trainingTickTimer = setInterval(function() {
-    tick++;
-    var ts = document.querySelector('.train-elapsed');
-    if (ts) ts.textContent = tick + 's';
-  }, 1000);
-
   trainingPollTimer = setTimeout(function poll() {
-    fetch('/api/models/train/status').then(function(r) { return r.json(); }).then(function(s) {
-      if (s.status === 'running') {
-        var ts = document.querySelector('.train-elapsed');
-        if (ts) {
-          tick = s.elapsed;
-          ts.textContent = tick + 's';
-        }
-        trainingPollTimer = setTimeout(poll, 2000);
-      } else {
-        if (trainingTickTimer) { clearInterval(trainingTickTimer); trainingTickTimer = null; }
+  fetch('/api/models/train/status').then(function(r) { return r.json(); }).then(function(s) {
+    if (s.status === 'running') {
+      var ts = document.querySelector('.train-elapsed');
+      if (ts && s.elapsed > 0) {
+        ts.innerHTML = formatDuration(s.elapsed);
+      }
+      trainingPollTimer = setTimeout(poll, 2000);
+    } else if (s.status === 'completed') {
+      trainingPollTimer = null;
+      _isTraining = false;
+      var ts = document.querySelector('.train-elapsed');
+      if (ts) ts.textContent = 'done';
+      var btn = document.getElementById('train-btn');
+      if (btn) {
+        btn.disabled = false;
+        btn.style.opacity = '1';
+        btn.style.cursor = 'pointer';
+        btn.textContent = 'Train via Flask';
+      }
+      checkActiveModel();
+      modelsLoaded = false;
+      setTimeout(function() {
         var row = document.querySelector('.training-row');
         if (row) row.remove();
-        var btn = document.getElementById('train-btn');
-        if (btn) {
-          btn.disabled = false;
-          btn.style.opacity = '1';
-          btn.style.cursor = 'pointer';
-          btn.textContent = 'Train via Flask';
-        }
-        modelsLoaded = false;
         loadModels();
+      }, 1500);
+    } else {
+      if (_isTraining) {
+        _isTraining = false;
+        checkActiveModel();
       }
+      trainingPollTimer = setTimeout(poll, 2000);
+    }
     }).catch(function() {
       trainingPollTimer = setTimeout(poll, 2000);
     });
@@ -1025,7 +1204,9 @@ function fetchLogs() {
       } else if (linesToShow.length > 0) {
         logContainer.innerHTML += '\n' + linesToShow.join('\n');
         var body = document.getElementById('log-panel-body');
-        body.scrollTop = body.scrollHeight;
+        if (body.scrollHeight - body.scrollTop - body.clientHeight < 80) {
+          body.scrollTop = body.scrollHeight;
+        }
       }
     } else {
       clearBarrier = null;

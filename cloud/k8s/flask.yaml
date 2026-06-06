@@ -16,7 +16,7 @@ spec:
       serviceAccountName: flask-sa
       containers:
       - name: flask
-        image: europe-west1-docker.pkg.dev/practica-creativa-496014/ibdn/flask:latest
+        image: europe-west1-docker.pkg.dev/REPLACE_PROJECT/ibdn/flask:latest
         ports:
         - containerPort: 5001
         envFrom:

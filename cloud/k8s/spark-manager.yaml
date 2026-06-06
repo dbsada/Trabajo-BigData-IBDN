@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
       - name: spark-manager
-        image: europe-west1-docker.pkg.dev/practica-creativa-496014/ibdn/spark:latest
+        image: europe-west1-docker.pkg.dev/REPLACE_PROJECT/ibdn/spark:latest
         ports:
         - containerPort: 8080
           name: ui

@@ -28,25 +28,64 @@ def _wait_for_spark(**context):
 
 
 def _train_model(**context):
-    import time as _time
-    driver_id = None
-    # Submit the Spark job
-    cmd = (
-        f"docker exec spark-manager spark-submit --master spark://spark-manager:7077 "
-        f"--deploy-mode cluster --conf spark.cores.max=2 "
-        f"--conf spark.hadoop.fs.s3a.access.key=admin "
-        f"--conf spark.hadoop.fs.s3a.secret.key=password "
-        f"--conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 "
-        f"--conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem "
-        f"--conf spark.hadoop.fs.s3a.path.style.access=true "
-        f"--conf spark.hadoop.fs.s3a.connection.ssl.enabled=false "
+    import time as _time, json as _json
+    access_key = os.getenv("MINIO_ROOT_USER", "admin")
+    secret_key = os.getenv("MINIO_ROOT_PASSWORD", "password")
+    mlflow_uri = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+
+    # Detect if Docker is available (local) or we need kubectl/Spark REST API (GKE)
+    use_docker = subprocess.run(
+        "docker info >/dev/null 2>&1", shell=True
+    ).returncode == 0
+
+    if use_docker:
+        cmd = (
+            f"docker exec spark-manager spark-submit --master spark://spark-manager:7077 "
+            f"--deploy-mode cluster --conf spark.cores.max=2 "
+            f"--conf spark.hadoop.fs.s3a.access.key={access_key} "
+            f"--conf spark.hadoop.fs.s3a.secret.key={secret_key} "
+            f"--conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 "
+            f"--conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem "
+            f"--conf spark.hadoop.fs.s3a.path.style.access=true "
+            f"--conf spark.hadoop.fs.s3a.connection.ssl.enabled=false "
+        f"--conf spark.executorEnv.MLFLOW_TRACKING_URI={mlflow_uri} "
+        f"--conf spark.driverEnv.MODEL_VERSION={os.getenv('MODEL_VERSION', '1.0')} "
+        f"--conf spark.driverEnv.BUCKETIZER_VERSION={os.getenv('BUCKETIZER_VERSION', '1.0')} "
         f"--conf spark.driver.extraJavaOptions=--add-opens=java.base/sun.util.calendar=ALL-UNNAMED "
         f"--class es.upm.dit.ging.predictor.TrainModel {JAR}"
-    )
-    result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=1800)
-    print(result.stdout)
-    if result.stderr:
-        print(result.stderr)
+        )
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=1800)
+        print(result.stdout)
+        if result.stderr:
+            print(result.stderr)
+    else:
+        # GKE: use Spark REST API via kubectl exec
+        spark_conf = (
+            f"spark.master=spark://spark-manager:7077,"
+            f"spark.submit.deployMode=cluster,"
+            f"spark.cores.max=2,"
+            f"spark.driver.memory=2g,"
+            f"spark.executor.memory=2g,"
+            f"spark.hadoop.fs.s3a.access.key={access_key},"
+            f"spark.hadoop.fs.s3a.secret.key={secret_key},"
+            f"spark.hadoop.fs.s3a.endpoint=http://minio:9000,"
+            f"spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem,"
+            f"spark.hadoop.fs.s3a.path.style.access=true,"
+            f"spark.hadoop.fs.s3a.connection.ssl.enabled=false,"
+            f"spark.executorEnv.MLFLOW_TRACKING_URI={mlflow_uri}"
+        )
+        payload = _json.dumps({
+            "action": "CreateSubmissionRequest",
+            "appArgs": [],
+            "appResource": f"file:{JAR}",
+            "clientSparkVersion": "4.1.1",
+            "environmentVariables": {"MLFLOW_TRACKING_URI": mlflow_uri},
+            "mainClass": "es.upm.dit.ging.predictor.TrainModel",
+            "sparkProperties": dict(item.split("=", 1) for item in spark_conf.split(",")),
+        })
+        r = req.post("http://spark-manager:6066/v1/submissions/create",
+                     data=payload, headers={"Content-Type": "application/json"}, timeout=10)
+        print(f"Spark REST submit: {r.status_code} {r.text[:300]}")
 
     # Wait for the Spark app to appear and then finish
     for _ in range(120):
@@ -58,15 +97,12 @@ def _train_model(**context):
                       if "train_spark_mllib_model" in a.get("name", "")
                       and a.get("state") not in ("FINISHED", "KILLED", "FAILED")]
             if not active:
-                # Check if it finished in completedapps
                 completed = [a for a in data.get("completedapps", [])
                              if "train_spark_mllib_model" in a.get("name", "")]
                 if completed:
                     print(f"Training job finished: state={completed[0].get('state')}")
                     return
-                # No active and no completed means it hasn't appeared yet
                 continue
-            driver_id = active[0].get("id", driver_id or "")
             print(f"Training still running ({active[0].get('duration', 0)//1000}s)...")
         except Exception as e:
             print(f"Poll error: {e}")
