@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <title>IBDN · Flight Delay Prediction</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='28' font-size='28'>&#9992;</text></svg>">
+    <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
     <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
@@ -246,7 +246,7 @@ body {
     <script src="/static/jquery-1.12.2.min.js"></script>
     <script>var DEPLOY_MODE = "{{ DEPLOY_MODE }}";</script>
     <div class="container">
-      <div class="header"><strong>✈ IBDN</strong> · Flight Delay Prediction <span style="{{ DEPLOY_STYLE }};font-size:0.7rem;padding:0.15rem 0.5rem;border-radius:4px;font-weight:600;vertical-align:middle;margin-left:0.5rem">{{ DEPLOY_LABEL }}</span></div>
+      <div class="header"><img src="/static/icon.svg" style="height:3em;vertical-align:middle;margin-right:0.5em" alt=""><strong>IBDN</strong> · Flight Delay Prediction <span style="{{ DEPLOY_STYLE }};font-size:0.7rem;padding:0.15rem 0.5rem;border-radius:4px;font-weight:600;vertical-align:middle;margin-left:0.5rem">{{ DEPLOY_LABEL }}</span></div>
       <div class="main-grid">
         <div>{% block body %}{% endblock %}</div>
         <div>{% block arch %}{% endblock %}</div>

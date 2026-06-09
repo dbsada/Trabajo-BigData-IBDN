@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from airflow import DAG
+from airflow.decorators import dag
 from airflow.operators.python import PythonOperator
 import subprocess
 import mlflow
@@ -15,16 +15,16 @@ JAR = "/app/flight_prediction/target/scala-2.13/flight_prediction_2.13-0.1.jar"
 
 def _wait_for_spark(**context):
     """Wait for Spark master to be ready."""
-    for _ in range(24):
-        try:
-            r = req.get("http://spark-manager:8080/json/", timeout=5)
-            if r.status_code == 200:
-                print("Spark master is ready")
-                return
-        except Exception:
-            pass
-        time.sleep(10)
-    raise Exception("Spark master did not become ready within 4 minutes")
+    for _ in range(48):
+        r = subprocess.run(
+            ["curl", "-s", "--connect-timeout", "3", "--max-time", "5",
+             "http://spark-manager:8080/json/"],
+            capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            print("Spark master is ready")
+            return
+        time.sleep(3)
+    raise Exception("Spark master did not become ready within 2.5 minutes")
 
 
 def _train_model(**context):
@@ -32,6 +32,24 @@ def _train_model(**context):
     access_key = os.getenv("MINIO_ROOT_USER", "admin")
     secret_key = os.getenv("MINIO_ROOT_PASSWORD", "password")
     mlflow_uri = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+    run_name = (context.get("dag_run") and context["dag_run"].conf or {}).get("run_name", "rf_training")
+
+    conf = (context.get("dag_run") and context["dag_run"].conf) or {}
+    max_bins = conf.get("max_bins", 4657)
+    max_memory_mb = conf.get("max_memory_mb", 1024)
+    num_trees = conf.get("num_trees", 20)
+    max_depth = conf.get("max_depth", 10)
+    run_name = conf.get("run_name", "").strip() or None
+
+    app_args = [
+        "--max-bins", str(max_bins),
+        "--max-memory-mb", str(max_memory_mb),
+        "--num-trees", str(num_trees),
+        "--max-depth", str(max_depth),
+    ]
+    if run_name:
+        app_args.extend(["--run-name", run_name])
+    print(f"Training with: max_bins={max_bins}, num_trees={num_trees}, max_depth={max_depth}, run_name={run_name or 'default'}")
 
     # Detect if Docker is available (local) or we need kubectl/Spark REST API (GKE)
     use_docker = subprocess.run(
@@ -52,7 +70,7 @@ def _train_model(**context):
         f"--conf spark.driverEnv.MODEL_VERSION={os.getenv('MODEL_VERSION', '1.0')} "
         f"--conf spark.driverEnv.BUCKETIZER_VERSION={os.getenv('BUCKETIZER_VERSION', '1.0')} "
         f"--conf spark.driver.extraJavaOptions=--add-opens=java.base/sun.util.calendar=ALL-UNNAMED "
-        f"--class es.upm.dit.ging.predictor.TrainModel {JAR}"
+        f"--class es.upm.dit.ging.predictor.TrainModel {JAR} " + " ".join(app_args)
         )
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=1800)
         print(result.stdout)
@@ -72,11 +90,21 @@ def _train_model(**context):
             f"spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem,"
             f"spark.hadoop.fs.s3a.path.style.access=true,"
             f"spark.hadoop.fs.s3a.connection.ssl.enabled=false,"
+            f"spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions,"
+            f"spark.sql.catalog.lakehouse=org.apache.iceberg.spark.SparkCatalog,"
+            f"spark.sql.catalog.lakehouse.type=hadoop,"
+            f"spark.sql.catalog.lakehouse.io-impl=org.apache.iceberg.hadoop.HadoopFileIO,"
+            f"spark.sql.catalog.lakehouse.warehouse=s3a://lakehouse,"
+            f"spark.sql.catalog.lakehouse.s3.endpoint=http://minio:9000,"
+            f"spark.sql.catalog.lakehouse.s3.access-key={access_key},"
+            f"spark.sql.catalog.lakehouse.s3.secret-key={secret_key},"
+            f"spark.sql.catalog.lakehouse.s3.path-style-access=true,"
+            f"spark.sql.defaultCatalog=lakehouse,"
             f"spark.executorEnv.MLFLOW_TRACKING_URI={mlflow_uri}"
         )
         payload = _json.dumps({
             "action": "CreateSubmissionRequest",
-            "appArgs": [],
+            "appArgs": app_args,
             "appResource": f"file:{JAR}",
             "clientSparkVersion": "4.1.1",
             "environmentVariables": {"MLFLOW_TRACKING_URI": mlflow_uri},
@@ -101,29 +129,64 @@ def _train_model(**context):
                              if "train_spark_mllib_model" in a.get("name", "")]
                 if completed:
                     print(f"Training job finished: state={completed[0].get('state')}")
-                    return
+                    break
                 continue
             print(f"Training still running ({active[0].get('duration', 0)//1000}s)...")
         except Exception as e:
             print(f"Poll error: {e}")
-    raise Exception("Timed out waiting for training job to finish")
+    else:
+        raise Exception("Timed out waiting for training job to finish")
+
+    # Wait for MLflow run to appear
+    for _ in range(12):
+        _time.sleep(5)
+        try:
+            rr = req.post(f"{mlflow_uri}/api/2.0/mlflow/runs/search",
+                json={"experiment_ids":["0"],"order_by":["start_time desc"],"max_results":1},
+                timeout=5)
+            runs = rr.json().get("runs", [])
+            if runs:
+                found = runs[0]
+                rn = found.get("data",{}).get("tags",[])
+                found_name = ""
+                for t in rn:
+                    if t.get("key") == "mlflow.runName":
+                        found_name = t.get("value","")
+                if found_name == run_name or any(
+                    p.get("key") == "model_version" and p.get("value", "") == found["info"]["run_id"]
+                    for p in found.get("data",{}).get("params",[])
+                ):
+                    ti = context["ti"]
+                    ti.xcom_push(key="mlflow_run_id", value=found["info"]["run_id"])
+                    print(f"MLflow run found: {found['info']['run_id'][:12]} ({found_name})")
+                    return
+        except Exception as e:
+            print(f"MLflow poll error: {e}")
+    print("Warning: MLflow run not found after training, continuing anyway")
 
 
 def _check_and_register(**context):
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     client = mlflow.tracking.MlflowClient()
 
-    runs = client.search_runs(
-        experiment_ids=["0"],
-        order_by=["start_time DESC"],
-        max_results=1,
-    )
-    if not runs:
-        print("No runs found in MLflow experiment 0")
-        return
+    ti = context["ti"]
+    run_id = ti.xcom_pull(key="mlflow_run_id", task_ids="train_model")
+    if not run_id:
+        runs = client.search_runs(
+            experiment_ids=["0"],
+            order_by=["start_time DESC"],
+            max_results=1,
+        )
+        if not runs:
+            print("No runs found in MLflow experiment 0")
+            return
+        run = runs[0]
+        run_id = run.info.run_id
+        print(f"Using latest MLflow run: {run_id}")
+    else:
+        run = client.get_run(run_id)
+        print(f"Using XCom MLflow run: {run_id}")
 
-    run = runs[0]
-    run_id = run.info.run_id
     accuracy = run.data.metrics.get("accuracy", 0)
     print(f"Run: {run_id}, Accuracy: {accuracy:.4f}, Threshold: {MIN_ACCURACY}")
 
@@ -151,7 +214,7 @@ def _check_and_register(**context):
         print(f"Model has no 'model' artifact — Spark saves to MinIO directly: {e}")
 
 
-with DAG(
+@dag(
     dag_id="train_flight_delay_model",
     default_args={
         "owner": "airflow",
@@ -163,7 +226,8 @@ with DAG(
     start_date=datetime(2025, 1, 1),
     catchup=False,
     tags=["ml", "spark"],
-) as dag:
+)
+def train_flight_delay_model():
 
     spark_ready = PythonOperator(
         task_id="spark_ready",
@@ -181,3 +245,5 @@ with DAG(
     )
 
     spark_ready >> train_model >> check_and_register
+
+dag = train_flight_delay_model()

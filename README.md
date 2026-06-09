@@ -51,23 +51,11 @@ Se ha creado un CLI personalizado llamado `predict` para facilitar el despliegue
 
 ```shell
 predict docker   # Para desplegar localmente con Docker Compose
-predict gcloud   # Para desplegar en Google Cloud
 predict gke      # Para desplegar en Google Kubernetes Engine
 ```
 
-El comando acepta un argumento `--db` para elegir entre Cassandra o MongoDB como base de datos:
-
-```shell
-predict [docker/gcloud/gke] --db cassandra   # POR DEFECTO
-predict [docker/gcloud/gke] --db mongo
-```
-
-> [!WARNING]
-> No ha sido posible comprobar que el funcionamiento con MongoDB es correcto todavía. Será revisado en las próximas horas.
-
 ¡La aplicación está lista! Para entender la interfaz, puedes leer:
 - [Instrucciones docker](docs/DOCKER.md)
-- [Instrucciones gcloud](docs/GCLOUD.md)
 - [Instrucciones gke](docs/GKE.md)
 
 Cada uno irá detallando los pasos específicos de cada modo de despliegue, incluyendo capturas de pantalla para facilitar la comprensión.

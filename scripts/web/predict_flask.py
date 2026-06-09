@@ -1,7 +1,6 @@
 import sys, os, re, logging
 from flask import Flask, render_template, request, redirect, url_for
-from pymongo import MongoClient
-from bson import json_util
+import json
 import socket
 import time
 import json
@@ -25,23 +24,26 @@ class LogFilter(logging.Filter):
 
 logging.getLogger('werkzeug').addFilter(LogFilter())
 
-MONGODB_URI = os.getenv('MONGODB_URI', 'mongodb://mongodb:27017/')
-MONGODB_DATABASE = os.getenv('MONGODB_DATABASE', 'agile_data_science')
 KAFKA_BOOTSTRAP_SERVERS = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka:9092')
 KAFKA_LOCAL_BOOTSTRAP_SERVERS = os.getenv('KAFKA_LOCAL_BOOTSTRAP_SERVERS', 'localhost:9092')
 KAFKA_TOPIC = os.getenv('KAFKA_TOPIC', 'flight-delay-ml-request')
 KAFKA_RESPONSE_TOPIC = os.getenv('KAFKA_RESPONSE_TOPIC', 'flight-delay-ml-response')
 KAFKA_STATUS_TOPIC = os.getenv('KAFKA_STATUS_TOPIC', 'flight-delay-ml-status')
 
-_mongo_client = None
-_mongo_db = None
-
-def _get_mongo():
-    global _mongo_client, _mongo_db
-    if _mongo_client is None:
-        _mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=3000)
-        _mongo_db = _mongo_client[MONGODB_DATABASE]
-    return _mongo_db
+# Cassandra-only: stub to avoid breaking legacy routes
+class _StubDB:
+    def find(self, *a, **kw): return []
+    def find_one(self, *a, **kw): return None
+    def count_documents(self, *a, **kw): return 0
+    def insert_one(self, *a, **kw): pass
+    def sort(self, *a, **kw): return self
+    def skip(self, *a, **kw): return self
+    def limit(self, *a, **kw): return self
+    def __getitem__(self, key): return self
+    def __getattr__(self, name): return self
+_db_stub = _StubDB()
+def _get_db():
+    return _db_stub
 
 @app.context_processor
 def inject_arch_info():
@@ -57,9 +59,6 @@ def inject_arch_info():
     if deploy_mode == 'gke':
         deploy_label = '⚡ GKE'
         deploy_style = 'background:#fdc41b20;color:#fdc41b;border:1px solid #fdc41b40'
-    elif deploy_mode == 'gcloud':
-        deploy_label = '☁️ GCloud'
-        deploy_style = 'background:#2563eb20;color:#60a5fa;border:1px solid #2563eb40'
     else:
         deploy_label = '🖥️ Local'
         deploy_style = 'background:#22c55e20;color:#22c55e;border:1px solid #22c55e40'
@@ -94,7 +93,7 @@ def api_airports():
         _airport_cache = sorted(codes)
     q = request.args.get('q', '').upper()
     match = [a for a in _airport_cache if a.startswith(q)] if q else _airport_cache
-    return json_util.dumps(match[:50])
+    return json.dumps(match[:50])
 
 _minio_client = None
 
@@ -182,7 +181,7 @@ def api_models():
         except Exception:
             active_run_id = None
 
-    return json_util.dumps({"models": model_list, "active_run_id": active_run_id})
+    return json.dumps({"models": model_list, "active_run_id": active_run_id})
 
 @app.route("/api/models/activate/<run_id>", methods=["POST"])
 def api_activate_model(run_id):
@@ -220,7 +219,7 @@ def api_activate_model(run_id):
         errors.append(str(e))
 
     threading.Thread(target=_restart_prediction_job, daemon=True).start()
-    return json_util.dumps({"ok": True, "active_run_id": run_id, "errors": errors if errors else None})
+    return json.dumps({"ok": True, "active_run_id": run_id, "errors": errors if errors else None})
 
 _pipeline_state_file = '/tmp/pipeline_state.json'
 _pipeline_state_lock = threading.Lock()
@@ -249,12 +248,8 @@ def _detect_pipeline_state(state):
         state.setdefault("core_services", {"status": "done", "message": "Flask running", "ts": now})
         state["core_services"]["status"] = "done"
 
-        # Don't auto-detect pipeline steps unless the pipeline has started
-        pipeline_steps = {"infra_services", "buckets", "download", "upload",
-                          "import_distances", "topics", "prediction", "done"}
-        has_started = any(k in state and isinstance(state[k], dict)
-                          for k in pipeline_steps)
-        if not has_started:
+        # Don't auto-detect pipeline steps unless core_services is done
+        if not _is_done(state, "core_services"):
             return state
 
         # Check infra services (MinIO + Spark)
@@ -313,6 +308,19 @@ def _detect_pipeline_state(state):
 
         # Check Spark prediction
         try:
+            from botocore.config import Config as _S3Config
+            import boto3 as _s3
+            _mc = _s3.client("s3",
+                endpoint_url=os.getenv("MINIO_ENDPOINT", "http://minio:9000"),
+                aws_access_key_id=os.getenv("MINIO_ROOT_USER", "admin"),
+                aws_secret_access_key=os.getenv("MINIO_ROOT_PASSWORD", "password"),
+                config=_S3Config(signature_version="s3v4"))
+            has_active_model = False
+            try:
+                _mc.head_object(Bucket="lakehouse", Key="models/active_run_id.txt")
+                has_active_model = True
+            except Exception:
+                pass
             r = _req.get("http://spark-manager:8080/json/", timeout=5)
             j = r.json()
             has_prediction = False
@@ -327,6 +335,8 @@ def _detect_pipeline_state(state):
                         break
             if has_prediction and _safe_get(state, "prediction").get("status") != "done":
                 state["prediction"] = {"status": "done", "message": "Prediction engine started", "ts": now}
+            elif not has_active_model and _safe_get(state, "prediction").get("status") != "done":
+                state["prediction"] = {"status": "pending", "message": "Waiting for model — train one in Models tab", "ts": now}
         except Exception:
             pass
 
@@ -356,14 +366,14 @@ def api_pipeline_progress():
     status = data.get("status")
     message = data.get("message", "")
     if not step or not status:
-        return json_util.dumps({"error": "step and status required"}), 400
+        return json.dumps({"error": "step and status required"}), 400
     with _pipeline_state_lock:
         state = _load_pipeline_state()
         state[step] = {"status": status, "message": message, "ts": time.time()}
         state = _detect_pipeline_state(state)
         _save_pipeline_state(state)
     socketio.emit('pipeline_progress', {"step": step, "status": status, "message": message})
-    return json_util.dumps({"ok": True})
+    return json.dumps({"ok": True})
 
 @app.route("/api/pipeline/progress")
 def api_get_pipeline_progress():
@@ -371,7 +381,7 @@ def api_get_pipeline_progress():
         state = _load_pipeline_state()
         state = _detect_pipeline_state(state)
         _save_pipeline_state(state)
-    return json_util.dumps(state)
+    return json.dumps(state)
 
 @app.route("/pipeline")
 def pipeline_page():
@@ -384,14 +394,12 @@ def _restart_prediction_job():
     if deploy_mode == "gke":
         import requests as req, time
         with _prediction_job_lock:
+            old_app_id = None
             try:
                 r = req.get("http://spark-manager:8080/json/", timeout=3)
                 for app in r.json().get("activeapps", []):
                     if "FlightDelayPrediction" in app.get("name", ""):
-                        app_id = app.get("id", "")
-                        req.post(f"http://spark-manager:8080/app/kill/?id={app_id}&terminate=true", timeout=3)
-                        print(f"[PRED] Killed existing GKE prediction job {app_id}")
-                        time.sleep(3)
+                        old_app_id = app.get("id", "")
             except Exception:
                 pass
             try:
@@ -415,6 +423,16 @@ def _restart_prediction_job():
                         "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
                         "spark.hadoop.fs.s3a.path.style.access": "true",
                         "spark.hadoop.fs.s3a.connection.ssl.enabled": "false",
+                        "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+                        "spark.sql.catalog.lakehouse": "org.apache.iceberg.spark.SparkCatalog",
+                        "spark.sql.catalog.lakehouse.type": "hadoop",
+                        "spark.sql.catalog.lakehouse.io-impl": "org.apache.iceberg.hadoop.HadoopFileIO",
+                        "spark.sql.catalog.lakehouse.warehouse": "s3a://lakehouse",
+                        "spark.sql.catalog.lakehouse.s3.endpoint": "http://minio:9000",
+                        "spark.sql.catalog.lakehouse.s3.access-key": "admin",
+                        "spark.sql.catalog.lakehouse.s3.secret-key": "password",
+                        "spark.sql.catalog.lakehouse.s3.path-style-access": "true",
+                        "spark.sql.defaultCatalog": "lakehouse",
                         "spark.driverEnv.MODEL_VERSION": os.getenv("MODEL_VERSION", "1.0"),
                         "spark.driverEnv.BUCKETIZER_VERSION": os.getenv("BUCKETIZER_VERSION", "1.0"),
                     }
@@ -422,10 +440,29 @@ def _restart_prediction_job():
                 r = req.post("http://spark-manager:6066/v1/submissions/create", json=payload, timeout=10)
                 if r.status_code in (200, 201):
                     print("[PRED] GKE prediction submitted via Spark REST API")
+                    for _ in range(30):
+                        time.sleep(2)
+                        try:
+                            rr = req.get("http://spark-manager:8080/json/", timeout=3)
+                            new_active = [a for a in rr.json().get("activeapps", [])
+                                          if "FlightDelayPrediction" in a.get("name", "")
+                                          and a.get("id") != old_app_id]
+                            if new_active:
+                                print(f"[PRED] New prediction job {new_active[0]['id']} is active")
+                                break
+                        except Exception:
+                            pass
                 else:
                     print(f"[PRED] Spark REST submit failed: {r.status_code} {r.text[:200]}")
             except Exception as e:
                 print(f"[PRED] GKE submit error: {e}")
+            if old_app_id:
+                try:
+                    req.post(f"http://spark-manager:8080/app/kill/?id={old_app_id}&terminate=true", timeout=3)
+                    print(f"[PRED] Killed old prediction job {old_app_id}")
+                    time.sleep(5)
+                except Exception:
+                    pass
         return
 
     import docker, requests as req, threading, time
@@ -487,7 +524,7 @@ def _restart_prediction_job():
 @app.route("/api/prediction/restart", methods=["POST"])
 def api_restart_prediction():
     _restart_prediction_job()
-    return json_util.dumps({"ok": True})
+    return json.dumps({"ok": True})
 
 @app.route("/api/prediction/status")
 def api_prediction_status():
@@ -496,10 +533,10 @@ def api_prediction_status():
         r = req.get("http://spark-manager:8080/json/", timeout=3)
         for app in r.json().get("activeapps", []):
             if "FlightDelayPrediction" in app.get("name", ""):
-                return json_util.dumps({"running": True})
+                return json.dumps({"running": True})
     except Exception:
         pass
-    return json_util.dumps({"running": False})
+    return json.dumps({"running": False})
 
 _train_lock = threading.Lock()
 
@@ -518,7 +555,7 @@ def api_train_model():
             if not has_app:
                 api_train_model._training = False
             else:
-                return json_util.dumps({"status": "already_running"}), 200
+                return json.dumps({"status": "already_running"}), 200
 
     # Read hyperparameters from request
     data = request.get_json(silent=True) or {}
@@ -529,7 +566,7 @@ def api_train_model():
     run_name = data.get("run_name", "").strip() or None
 
     if max_bins < 4200:
-        return json_util.dumps({"error": f"maxBins ({max_bins}) too low. Dataset needs at least 4200. Slider range is 4200-10000."}), 400
+        return json.dumps({"error": f"maxBins ({max_bins}) too low. Dataset needs at least 4200. Slider range is 4200-10000."}), 400
 
     try:
         import time as _t
@@ -579,6 +616,16 @@ def api_train_model():
                     "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
                     "spark.hadoop.fs.s3a.path.style.access": "true",
                     "spark.hadoop.fs.s3a.connection.ssl.enabled": "false",
+                    "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+                    "spark.sql.catalog.lakehouse": "org.apache.iceberg.spark.SparkCatalog",
+                    "spark.sql.catalog.lakehouse.type": "hadoop",
+                    "spark.sql.catalog.lakehouse.io-impl": "org.apache.iceberg.hadoop.HadoopFileIO",
+                    "spark.sql.catalog.lakehouse.warehouse": "s3a://lakehouse",
+                    "spark.sql.catalog.lakehouse.s3.endpoint": "http://minio:9000",
+                    "spark.sql.catalog.lakehouse.s3.access-key": os.getenv("MINIO_ROOT_USER", "admin"),
+                    "spark.sql.catalog.lakehouse.s3.secret-key": os.getenv("MINIO_ROOT_PASSWORD", "password"),
+                    "spark.sql.catalog.lakehouse.s3.path-style-access": "true",
+                    "spark.sql.defaultCatalog": "lakehouse",
                     "spark.driver.extraJavaOptions": "--add-opens=java.base/sun.util.calendar=ALL-UNNAMED",
                     "spark.driverEnv.MODEL_VERSION": os.getenv("MODEL_VERSION", "1.0"),
                     "spark.driverEnv.BUCKETIZER_VERSION": os.getenv("BUCKETIZER_VERSION", "1.0"),
@@ -654,11 +701,11 @@ def api_train_model():
 
         t = threading.Thread(target=_train, daemon=True)
         t.start()
-        return json_util.dumps({"status": "started", "last_run_id": last_run_id})
+        return json.dumps({"status": "started", "last_run_id": last_run_id})
     except Exception as e:
         api_train_model._training = False
         print(f"Training setup error: {e}")
-        return json_util.dumps({"error": str(e)}), 500
+        return json.dumps({"error": str(e)}), 500
 
 _last_training = {"running": False, "elapsed": 0, "ts": 0}
 
@@ -679,7 +726,7 @@ def api_train_status():
                 _last_training["running"] = True
                 _last_training["elapsed"] = app["duration"] // 1000
                 _last_training["ts"] = now
-                return json_util.dumps({"status": "running", "elapsed": _last_training["elapsed"]})
+                return json.dumps({"status": "running", "elapsed": _last_training["elapsed"]})
         # Check completed apps — training just finished
         for app in data.get("completedapps", []):
             if "train_spark_mllib_model" in app.get("name", ""):
@@ -687,15 +734,15 @@ def api_train_status():
                     api_train_model._training = False
                 _last_training["running"] = False
                 _last_training["elapsed"] = app.get("duration", 0) // 1000
-                return json_util.dumps({"status": "completed", "elapsed": _last_training["elapsed"]})
+                return json.dumps({"status": "completed", "elapsed": _last_training["elapsed"]})
         # No training app found — if _training flag is set, we're in the gap
         if is_training and now - _last_training.get("ts", 0) < 120:
-            return json_util.dumps({"status": "running", "elapsed": _last_training.get("elapsed", 0)})
+            return json.dumps({"status": "running", "elapsed": _last_training.get("elapsed", 0)})
     except Exception:
         if is_training and now - _last_training.get("ts", 0) < 120:
-            return json_util.dumps({"status": "running", "elapsed": _last_training.get("elapsed", 0)})
+            return json.dumps({"status": "running", "elapsed": _last_training.get("elapsed", 0)})
     _last_training["running"] = False
-    return json_util.dumps({"status": "idle"})
+    return json.dumps({"status": "idle"})
 
 @app.route("/api/models/train/cancel", methods=["POST"])
 def api_cancel_training():
@@ -710,9 +757,9 @@ def api_cancel_training():
                 req.post("http://spark-manager:8080/app/kill/", data={"id": app_id, "terminate": "true"}, timeout=3)
                 killed.append(app_id)
         api_train_model._training = False
-        return json_util.dumps({"ok": True, "killed": killed})
+        return json.dumps({"ok": True, "killed": killed})
     except Exception as e:
-        return json_util.dumps({"error": str(e)}), 500
+        return json.dumps({"error": str(e)}), 500
 
 @app.route("/api/models/delete/<run_id>", methods=["POST"])
 def api_delete_model(run_id):
@@ -744,17 +791,17 @@ def api_delete_model(run_id):
         except Exception:
             pass
 
-        return json_util.dumps({"ok": True})
+        return json.dumps({"ok": True})
     except Exception as e:
-        return json_util.dumps({"error": str(e)}), 500
+        return json.dumps({"error": str(e)}), 500
 
 @app.route("/api/services/status")
 def api_services_status():
     deploy_mode = os.getenv("DEPLOY_MODE", "")
     if deploy_mode == "gke":
-        return json_util.dumps({"services": {}, "mode": "gke"})
+        return json.dumps({"services": {}, "mode": "gke"})
     import docker
-    expected = ['kafka', 'mongodb', 'cassandra', 'spark-manager', 'spark-worker', 'flask', 'minio', 'mlflow', 'airflow-webserver', 'airflow-scheduler', 'airflow-postgres']
+    expected = ['kafka', 'cassandra', 'spark-manager', 'spark-worker', 'flask', 'minio', 'mlflow', 'airflow-webserver', 'airflow-scheduler', 'airflow-postgres']
     services = {}
     try:
         client = docker.from_env()
@@ -769,14 +816,14 @@ def api_services_status():
             except docker.errors.NotFound:
                 services[name] = {"status": "stopped", "image": "—"}
     except Exception as e:
-        return json_util.dumps({"error": str(e), "services": {}})
-    return json_util.dumps({"services": services})
+        return json.dumps({"error": str(e), "services": {}})
+    return json.dumps({"services": services})
 
 @app.route("/api/gke/status")
 def api_gke_status():
     """Get GKE cluster nodes and pods status using K8s in-cluster API."""
     if os.getenv("DEPLOY_MODE", "") != "gke":
-        return json_util.dumps({"nodes": [], "pods": [], "error": "Only available in GKE mode"})
+        return json.dumps({"nodes": [], "pods": [], "error": "Only available in GKE mode"})
     result = {"nodes": [], "pods": [], "error": None}
     try:
         token = open("/var/run/secrets/kubernetes.io/serviceaccount/token").read().strip()
@@ -838,7 +885,7 @@ def api_gke_status():
                 })
     except Exception as e:
         result["error"] = str(e)
-    return json_util.dumps(result)
+    return json.dumps(result)
 
 @app.route("/api/gke/scale", methods=["POST"])
 def api_gke_scale():
@@ -872,34 +919,34 @@ def api_gke_scale():
                 cmd = (f"gcloud container clusters resize ibdn-cluster --node-pool default-pool "
                        f"--num-nodes {replicas} --zone {os.getenv('GCP_ZONE', 'europe-west1-b')} --project {os.getenv('GCP_PROJECT', 'REPLACE_PROJECT')} --quiet")
                 if r.returncode == 0:
-                    return json_util.dumps({"ok": True, "output": f"Node pool resizing to {replicas} nodes (from {node_count})"})
+                    return json.dumps({"ok": True, "output": f"Node pool resizing to {replicas} nodes (from {node_count})"})
                 err = (r.stdout.strip() + r.stderr.strip())[:300]
-                return json_util.dumps({
+                return json.dumps({
                     "ok": False,
                     "command": cmd,
                     "output": f"Auto-resize unavailable.\n\nRun in your terminal:"
                 })
-            return json_util.dumps({"ok": True, "output": f"Already at {node_count} nodes"})
+            return json.dumps({"ok": True, "output": f"Already at {node_count} nodes"})
         else:
             deployment = data.get("deployment", target.replace("deployment:", ""))
             if not deployment or replicas is None:
-                return json_util.dumps({"error": "deployment and replicas required"}), 400
+                return json.dumps({"error": "deployment and replicas required"}), 400
             body = json.dumps({"spec": {"replicas": int(replicas)}})
             r = k8s_api("PATCH", f"/apis/apps/v1/namespaces/ibdn/deployments/{deployment}", body)
-            return json_util.dumps({"ok": r.returncode == 0, "output": f"Scaled {deployment} to {replicas}"})
+            return json.dumps({"ok": r.returncode == 0, "output": f"Scaled {deployment} to {replicas}"})
     except Exception as e:
-        return json_util.dumps({"error": str(e)})
+        return json.dumps({"error": str(e)})
 
 @app.route("/api/models/push-gke", methods=["POST"])
 def api_models_push_gke():
     """Return command to push models from local to GKE MinIO."""
     deploy_mode = os.getenv("DEPLOY_MODE", "")
     if deploy_mode != "gke":
-        return json_util.dumps({"error": "Only available in GKE mode"}), 400
+        return json.dumps({"error": "Only available in GKE mode"}), 400
     data = request.get_json(silent=True) or {}
     run_ids = data.get("run_ids", [])
     if not run_ids:
-        return json_util.dumps({"error": "No models selected"}), 400
+        return json.dumps({"error": "No models selected"}), 400
     ids_str = " ".join(run_ids)
     cmd = (
         f"# 1. Start MinIO port-forward:\n"
@@ -907,7 +954,7 @@ def api_models_push_gke():
         f"# 2. Push models (run from your local terminal):\n"
         f"predict models push-gke {ids_str}"
     )
-    return json_util.dumps({"ok": False, "command": cmd, "output": "Push models from local to GKE:"})
+    return json.dumps({"ok": False, "command": cmd, "output": "Push models from local to GKE:"})
 
 @app.route("/api/models/push", methods=["POST"])
 def api_models_push():
@@ -918,7 +965,7 @@ def api_models_push():
     data = request.get_json(silent=True) or {}
     run_ids = data.get("run_ids", [])
     if not run_ids:
-        return json_util.dumps({"error": "No models selected"}), 400
+        return json.dumps({"error": "No models selected"}), 400
 
     gcp_project = os.getenv("GCP_PROJECT", "")
     gcp_zone = os.getenv("GCP_ZONE", "europe-west1-b")
@@ -927,7 +974,7 @@ def api_models_push():
     gcp_repo = f"/home/{gcp_user}/ibdn"
 
     if not gcp_project:
-        return json_util.dumps({"error": "GCP_PROJECT not configured"}), 500
+        return json.dumps({"error": "GCP_PROJECT not configured"}), 500
 
     s3 = boto3.client("s3",
         endpoint_url=MINIO_ENDPOINT,
@@ -985,7 +1032,7 @@ def api_models_push():
             results.append({"run_id": run_id, "status": "error", "message": str(e)})
 
     pushed = [r for r in results if r["status"] == "pushed"]
-    return json_util.dumps({"results": results, "pushed": len(pushed)})
+    return json.dumps({"results": results, "pushed": len(pushed)})
 
 @app.route("/api/airflow/password")
 def api_airflow_password():
@@ -999,23 +1046,25 @@ def api_airflow_password():
             port = os.getenv("KUBERNETES_SERVICE_PORT", "443")
             pods_json = subprocess.run(
                 ["curl", "-s", "--cacert", ca, "-H", f"Authorization: Bearer {token}",
-                 f"https://{host}:{port}/api/v1/namespaces/ibdn/pods?labelSelector=app=airflow-webserver"],
+                 f"https://{host}:{port}/api/v1/namespaces/ibdn/pods?labelSelector=app=airflow-webserver&fieldSelector=status.phase=Running"],
                 capture_output=True, text=True, timeout=10
             )
-            pod_name = json.loads(pods_json.stdout)["items"][0]["metadata"]["name"]
-            logs = subprocess.run(
-                ["curl", "-s", "--cacert", ca, "-H", f"Authorization: Bearer {token}",
-                 f"https://{host}:{port}/api/v1/namespaces/ibdn/pods/{pod_name}/log?tailLines=100"],
-                capture_output=True, text=True, timeout=10
-            )
-            for line in logs.stdout.split('\n'):
-                if "Password for user" in line:
-                    pw = line.rsplit(": ", 1)[-1].strip().strip("'")
-                    if pw:
-                        return json_util.dumps({"username": "admin", "password": pw})
+            items = json.loads(pods_json.stdout).get("items", [])
+            if items:
+                items.sort(key=lambda p: p["metadata"]["creationTimestamp"], reverse=True)
+                r = subprocess.run(
+                    ["curl", "-s", "--cacert", ca, "-H", f"Authorization: Bearer {token}",
+                     f"https://{host}:{port}/api/v1/namespaces/ibdn/pods/{items[0]['metadata']['name']}/log?tailLines=5000&container=webserver"],
+                    capture_output=True, text=True, timeout=10
+                )
+                for line in r.stdout.split('\n'):
+                    if "Password for user admin:" in line:
+                        pw = line.rsplit(": ", 1)[-1].strip().strip("'")
+                        if pw:
+                            return json.dumps({"username": "admin", "password": pw})
         except Exception:
             pass
-        return json_util.dumps({"username": "admin", "password": None})
+        return json.dumps({"username": "admin", "password": None})
     try:
         r = subprocess.run(
             ["docker", "logs", "airflow-webserver"],
@@ -1025,10 +1074,10 @@ def api_airflow_password():
             if "Password for user" in line:
                 pw = line.rsplit(": ", 1)[-1].strip()
                 if pw:
-                    return json_util.dumps({"username": "admin", "password": pw})
+                    return json.dumps({"username": "admin", "password": pw})
     except Exception:
         pass
-    return json_util.dumps({"username": "admin", "password": None})
+    return json.dumps({"username": "admin", "password": None})
 
 import sys, os
 _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -1038,9 +1087,8 @@ from utils.logs import Logs
 
 @app.route("/api/logs/all")
 def api_all_logs():
-    db_mode = os.environ.get('DB_MODE', 'cassandra')
-    result = Logs.get_all_logs(db_mode)
-    return json_util.dumps(result)
+    result = Logs.get_all_logs()
+    return json.dumps(result)
 
 @app.route("/api/logs/<service>")
 def api_service_logs(service):
@@ -1049,8 +1097,8 @@ def api_service_logs(service):
     if service == 'flask':
         result["logs"] = '\n'.join(l for l in result["logs"].split('\n') if '/api/logs/' not in l)
     if "error" in result:
-        return json_util.dumps(result), 404 if "not found" in result["error"].lower() else 500
-    return json_util.dumps(result)
+        return json.dumps(result), 404 if "not found" in result["error"].lower() else 500
+    return json.dumps(result)
 
 # Setup Kafka
 from kafka import KafkaProducer, KafkaConsumer
@@ -1073,38 +1121,54 @@ def get_producer():
     return get_producer._p
 
 # Persist prediction based on DB_MODE
-def persist_prediction(data):
-  db_mode = os.getenv('DB_MODE', 'cassandra')
-  if db_mode == 'cassandra':
-    session = predict_utils.get_cassandra_session()
-    if session:
-      session.execute("""
-        CREATE TABLE IF NOT EXISTS agile_data_science.flight_delay_ml_response (
-          uuid text PRIMARY KEY,
-          prediction int,
-          origin text, dest text, dep_delay double,
-          carrier text, flight_date text, flight_num text,
-          distance double, route text,
-          day_of_year int, day_of_month int, day_of_week int,
-          timestamp text
-        )
-      """)
-      session.execute("""
-        INSERT INTO agile_data_science.flight_delay_ml_response 
-        (uuid, prediction, origin, dest, dep_delay, carrier, flight_date, flight_num,
-         distance, route, day_of_year, day_of_month, day_of_week, timestamp)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-      """, (
-        data.get('UUID'), int(data.get('Prediction', 0)),
-        data.get('Origin'), data.get('Dest'), data.get('DepDelay'),
-        data.get('Carrier'), data.get('FlightDate'), data.get('FlightNum'),
-        data.get('Distance'), data.get('Route'),
-        int(data.get('DayOfYear', 0)), int(data.get('DayOfMonth', 0)), int(data.get('DayOfWeek', 0)),
-        str(data.get('Timestamp', ''))
-      ))
-    return
+_PREDICTION_CACHE_FILE = '/tmp/prediction_cache.json'
+import json as _json
 
-  _get_mongo().flight_delay_ml_response.insert_one(data)
+def _save_prediction_to_cache(uuid, data):
+  import os
+  cache = {}
+  if os.path.exists(_PREDICTION_CACHE_FILE):
+    try:
+      with open(_PREDICTION_CACHE_FILE) as f:
+        cache = _json.load(f)
+    except:
+      cache = {}
+  cache[uuid] = data
+  # Keep only last 50
+  if len(cache) > 50:
+    cache = dict(list(cache.items())[-50:])
+  with open(_PREDICTION_CACHE_FILE, 'w') as f:
+    _json.dump(cache, f)
+
+def _get_prediction_from_cache(uuid):
+  import os
+  if os.path.exists(_PREDICTION_CACHE_FILE):
+    try:
+      with open(_PREDICTION_CACHE_FILE) as f:
+        cache = _json.load(f)
+      return cache.get(uuid)
+    except:
+      pass
+  return None
+
+def persist_prediction(data):
+  _save_prediction_to_cache(data.get("UUID", ""), data)
+  session = predict_utils.get_cassandra_session()
+  if session:
+    session.execute("""
+      INSERT INTO agile_data_science.flight_delay_ml_response (
+        uuid, prediction, origin, dest, dep_delay, carrier,
+        flight_date, flight_num, distance, route,
+        day_of_year, day_of_month, day_of_week, timestamp
+      ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """, (
+      data.get('UUID'), int(data.get('Prediction', 0)),
+      data.get('Origin'), data.get('Dest'), float(data.get('DepDelay', 0.0)),
+      data.get('Carrier'), data.get('FlightDate'), data.get('FlightNum'),
+      data.get('Distance'), data.get('Route'),
+      int(data.get('DayOfYear', 0)), int(data.get('DayOfMonth', 0)), int(data.get('DayOfWeek', 0)),
+      str(data.get('Timestamp', ''))
+    ))
 
 @socketio.on('subscribe')
 def on_subscribe(data):
@@ -1124,7 +1188,36 @@ def _kafka_response_listener():
       if isinstance(data, dict) and 'UUID' in data:
         print(f"Consumer processing UUID: {data['UUID'][:12]} ...")
         socketio.emit('spark_status', {'status': 'PROCESSING'}, room=data.get('UUID', ''))
-        persist_prediction(data)
+        # Inline save to file cache  
+        import json as _jj
+        import os as _oo
+        _cf = '/tmp/prediction_cache.json'
+        _cd = {}
+        if _oo.path.exists(_cf):
+          try:
+            with open(_cf) as _ff: _cd = _jj.load(_ff)
+          except: _cd = {}
+        _cd[data.get("UUID", "")] = data
+        if len(_cd) > 50:
+          _cd = dict(list(_cd.items())[-50:])
+        with open(_cf, 'w') as _ff: _jj.dump(_cd, _ff)
+        print(f"SAVED TO CACHE: {data.get('UUID','')[:12]}")
+        session = predict_utils.get_cassandra_session()
+        if session:
+          session.execute("""
+            INSERT INTO agile_data_science.flight_delay_ml_response (
+              uuid, prediction, origin, dest, dep_delay, carrier,
+              flight_date, flight_num, distance, route,
+              day_of_year, day_of_month, day_of_week, timestamp
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+          """, (
+            data.get('UUID'), int(data.get('Prediction', 0)),
+            data.get('Origin'), data.get('Dest'), float(data.get('DepDelay', 0.0)),
+            data.get('Carrier'), data.get('FlightDate'), data.get('FlightNum'),
+            data.get('Distance'), data.get('Route'),
+            int(data.get('DayOfYear', 0)), int(data.get('DayOfMonth', 0)), int(data.get('DayOfWeek', 0)),
+            str(data.get('Timestamp', ''))
+          ))
         print(f"Consumer: saved event for {data['UUID'][:12]}")
         socketio.emit('saved', data, room=data.get('UUID', ''))
         socketio.emit('prediction', data, room=data.get('UUID', ''))
@@ -1160,7 +1253,7 @@ def on_time_performance():
   flight_date = request.args.get('FlightDate')
   flight_num = request.args.get('FlightNum')
   
-  flight = _get_mongo().on_time_performance.find_one({
+  flight = _get_db().on_time_performance.find_one({
     'Carrier': carrier,
     'FlightDate': flight_date,
     'FlightNum': flight_num
@@ -1172,7 +1265,7 @@ def on_time_performance():
 @app.route("/flights/<origin>/<dest>/<flight_date>")
 def list_flights(origin, dest, flight_date):
   
-  flights = _get_mongo().on_time_performance.find(
+  flights = _get_db().on_time_performance.find(
     {
       'Origin': origin,
       'Dest': dest,
@@ -1183,7 +1276,7 @@ def list_flights(origin, dest, flight_date):
       ('ArrTime', 1),
     ]
   )
-  flight_count = _get_mongo().on_time_performance.count_documents({
+  flight_count = _get_db().on_time_performance.count_documents({
     'Origin': origin,
     'Dest': dest,
     'FlightDate': flight_date
@@ -1199,7 +1292,7 @@ def list_flights(origin, dest, flight_date):
 # Controller: Fetch a flight table
 @app.route("/total_flights")
 def total_flights():
-  total_flights = _get_mongo().flights_by_month.find({}, 
+  total_flights = _get_db().flights_by_month.find({}, 
     sort = [
       ('Year', 1),
       ('Month', 1)
@@ -1209,17 +1302,17 @@ def total_flights():
 # Serve the chart's data via an asynchronous request (formerly known as 'AJAX')
 @app.route("/total_flights.json")
 def total_flights_json():
-  total_flights = _get_mongo().flights_by_month.find({}, 
+  total_flights = _get_db().flights_by_month.find({}, 
     sort = [
       ('Year', 1),
       ('Month', 1)
     ])
-  return json_util.dumps(total_flights, ensure_ascii=False)
+  return json.dumps(total_flights, ensure_ascii=False)
 
 # Controller: Fetch a flight chart
 @app.route("/total_flights_chart")
 def total_flights_chart():
-  total_flights = _get_mongo().flights_by_month.find({}, 
+  total_flights = _get_db().flights_by_month.find({}, 
     sort = [
       ('Year', 1),
       ('Month', 1)
@@ -1256,18 +1349,18 @@ def search_airplanes():
   print(json.dumps(nav_offsets))
 
   arg_dict = {}
-  mongo_query = {}
+  query = {}
   for item in search_config:
     field = item['field']
     value = request.args.get(field)
     print(field, value)
     arg_dict[field] = value
     if value:
-      mongo_query[field] = value
+      query[field] = value
 
-  airplanes_cursor = _get_mongo().airplanes.find(mongo_query).sort('Owner', 1).skip(start).limit(end - start)
+  airplanes_cursor = _get_db().airplanes.find(query).sort('Owner', 1).skip(start).limit(end - start)
   airplanes = list(airplanes_cursor)
-  airplane_count = _get_mongo().airplanes.count_documents(mongo_query)
+  airplane_count = _get_db().airplanes.count_documents(query)
 
   # Persist search parameters in the form template
   return render_template(
@@ -1283,14 +1376,14 @@ def search_airplanes():
 @app.route("/airplanes/chart/manufacturers.json")
 @app.route("/airplanes/chart/manufacturers.json")
 def airplane_manufacturers_chart():
-  mfr_chart = _get_mongo().airplane_manufacturer_totals.find_one()
+  mfr_chart = _get_db().airplane_manufacturer_totals.find_one()
   return json.dumps(mfr_chart)
 
 # Controller: Fetch a flight and display it
 @app.route("/airplane/<tail_number>")
 @app.route("/airplane/flights/<tail_number>")
 def flights_per_airplane(tail_number):
-  flights = _get_mongo().flights_per_airplane.find_one(
+  flights = _get_db().flights_per_airplane.find_one(
     {'TailNum': tail_number}
   )
   return render_template(
@@ -1302,10 +1395,10 @@ def flights_per_airplane(tail_number):
 # Controller: Fetch an airplane entity page
 @app.route("/airline/<carrier_code>")
 def airline(carrier_code):
-  airline_summary = _get_mongo().airlines.find_one(
+  airline_summary = _get_db().airlines.find_one(
     {'CarrierCode': carrier_code}
   )
-  airline_airplanes = _get_mongo().airplanes_per_carrier.find_one(
+  airline_airplanes = _get_db().airplanes_per_carrier.find_one(
     {'Carrier': carrier_code}
   )
   return render_template(
@@ -1342,7 +1435,7 @@ def index():
 @app.route("/airlines")
 @app.route("/airlines/")
 def airlines():
-  airlines = _get_mongo().airplanes_per_carrier.find()
+  airlines = _get_db().airplanes_per_carrier.find()
   return render_template('all_airlines.html', airlines=airlines)
 
 @app.route("/flights/search")
@@ -1367,28 +1460,28 @@ def search_flights():
   nav_path = predict_utils.strip_place(request.url)
   nav_offsets = predict_utils.get_navigation_offsets(start, end, config.RECORDS_PER_PAGE)
 
-  mongo_query = {}
+  query = {}
   if carrier:
-    mongo_query['Carrier'] = carrier
+    query['Carrier'] = carrier
   if flight_date:
-    mongo_query['FlightDate'] = flight_date
+    query['FlightDate'] = flight_date
   if origin:
-    mongo_query['Origin'] = origin
+    query['Origin'] = origin
   if dest:
-    mongo_query['Dest'] = dest
+    query['Dest'] = dest
   if tail_number:
-    mongo_query['TailNum'] = tail_number
+    query['TailNum'] = tail_number
   if flight_number:
-    mongo_query['FlightNum'] = flight_number
+    query['FlightNum'] = flight_number
 
-  flights_cursor = _get_mongo().on_time_performance.find(mongo_query).sort([
+  flights_cursor = _get_db().on_time_performance.find(query).sort([
     ('FlightDate', 1),
     ('DepTime', 1),
     ('Carrier', 1),
     ('FlightNum', 1)
   ]).skip(start).limit(end - start)
   flights = list(flights_cursor)
-  flight_count = _get_mongo().on_time_performance.count_documents(mongo_query)
+  flight_count = _get_db().on_time_performance.count_documents(query)
 
   # Persist search parameters in the form template
   return render_template(
@@ -1443,7 +1536,7 @@ def regress_flight_delays():
   prediction_features['FlightNum'] = api_form_values['FlightNum']
   
   # Set the derived values
-  prediction_features['Distance'] = predict_utils.get_flight_distance(_get_mongo(), api_form_values['Origin'], api_form_values['Dest'])
+  prediction_features['Distance'] = predict_utils.get_flight_distance(api_form_values['Origin'], api_form_values['Dest'])
   
   # Turn the date into DayOfYear, DayOfMonth, DayOfWeek
   date_features_dict = predict_utils.get_regression_date_args(api_form_values['FlightDate'])
@@ -1500,8 +1593,7 @@ def classify_flight_delays():
   
   # Set the derived values
   prediction_features['Distance'] = predict_utils.get_flight_distance(
-    _get_mongo(), api_form_values['Origin'],
-    api_form_values['Dest']
+    api_form_values['Origin'], api_form_values['Dest']
   )
   
   # Turn the date into DayOfYear, DayOfMonth, DayOfWeek
@@ -1514,10 +1606,10 @@ def classify_flight_delays():
   # Add a timestamp
   prediction_features['Timestamp'] = predict_utils.get_current_timestamp()
   
-  _get_mongo().prediction_tasks.insert_one(
+  _get_db().prediction_tasks.insert_one(
     prediction_features
   )
-  return json_util.dumps(prediction_features)
+  return json.dumps(prediction_features)
 
 @app.route("/flights/delays/predict_batch")
 def flight_delays_batch_page():
@@ -1545,8 +1637,8 @@ def flight_delays_batch_results_page(iso_date):
   rounded_tomorrow_dt = rounded_today + datetime.timedelta(days=1)
   iso_tomorrow = rounded_tomorrow_dt.isoformat()
   
-  # Fetch today's prediction results from Mongo
-  predictions = _get_mongo().prediction_results.find(
+  # Fetch today's prediction results
+  predictions = _get_db().prediction_results.find(
     {
       'Timestamp': {
         "$gte": iso_today,
@@ -1589,8 +1681,7 @@ def classify_flight_delays_realtime():
   
   # Set the derived values
   prediction_features['Distance'] = predict_utils.get_flight_distance(
-    _get_mongo(), api_form_values['Origin'],
-    api_form_values['Dest']
+    api_form_values['Origin'], api_form_values['Dest']
   )
   
   # Turn the date into DayOfYear, DayOfMonth, DayOfWeek
@@ -1621,9 +1712,9 @@ def classify_flight_delays_realtime():
     print(f"Prediction sent: {unique_id[:12]} to {PREDICTION_TOPIC}")
   except Exception as e:
     print(f"Kafka send error: {e}")
-    return json_util.dumps({"status": "ERROR", "error": f"Kafka send failed: {e}"}), 503
+    return json.dumps({"status": "ERROR", "error": f"Kafka send failed: {e}"}), 503
 
-  return json_util.dumps({"status": "OK", "id": unique_id})
+  return json.dumps({"status": "OK", "id": unique_id})
 
 @app.route("/flights/delays/predict_kafka")
 def flight_delays_page_kafka():
@@ -1652,7 +1743,7 @@ def classify_flight_delays_realtime_response(unique_id):
         (unique_id,)
       ).one()
       if row:
-        return json_util.dumps({
+        return json.dumps({
           "status": "OK", "id": unique_id,
           "prediction": {
             "UUID": row.uuid, "Prediction": row.prediction,
@@ -1666,11 +1757,14 @@ def classify_flight_delays_realtime_response(unique_id):
         })
 
   else:
-    prediction = _get_mongo().flight_delay_ml_response.find_one({"UUID": unique_id})
+    prediction = _get_db().flight_delay_ml_response.find_one({"UUID": unique_id})
     if prediction:
-      return json_util.dumps({"status": "OK", "id": unique_id, "prediction": prediction})
+      return json.dumps({"status": "OK", "id": unique_id, "prediction": prediction})
 
-  return json_util.dumps({"status": "WAIT", "id": unique_id})
+  cached = _get_prediction_from_cache(unique_id)
+  if cached:
+    return json.dumps({"status": "OK", "id": unique_id, "prediction": cached})
+  return json.dumps({"status": "WAIT", "id": unique_id})
 
 def shutdown_server():
   func = request.environ.get('werkzeug.server.shutdown')

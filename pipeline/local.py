@@ -39,7 +39,7 @@ def run_pipeline(cfg):
     console = Console()
 
     os.environ['SKIP_AUTO_START_PREDICTION'] = '1'
-    os.environ['DB_MODE'] = cfg.db_mode
+    os.environ['DB_MODE'] = 'cassandra'
 
     # Clear stale pipeline state
     state_file = '/tmp/pipeline_state.json'
@@ -51,16 +51,15 @@ def run_pipeline(cfg):
 
     console.print("[bold]Step 1/5:[/bold] Starting all services...")
     send_progress("core_services", "running", "Starting all services...")
-    docker_ops.compose_up(cfg.project_home, cfg.db_mode)
+    docker_ops.compose_up(cfg.project_home)
 
-    if cfg.db_mode == 'cassandra':
-        time.sleep(10)
-        if not docker_ops.is_cassandra_healthy():
-            console.print("[yellow]Cassandra crashed. Cleaning data and restarting...[/yellow]")
-            import subprocess
-            subprocess.run("docker volume rm -f $(docker volume ls -q --filter name=cassandra_data) $(docker volume ls -q --filter name=cassandra_hints) 2>/dev/null",
-                          shell=True, cwd=cfg.project_home)
-            docker_ops.restart_cassandra(cfg.project_home)
+    time.sleep(10)
+    if not docker_ops.is_cassandra_healthy():
+        console.print("[yellow]Cassandra crashed. Cleaning data and restarting...[/yellow]")
+        import subprocess
+        subprocess.run("docker volume rm -f $(docker volume ls -q --filter name=cassandra_data) $(docker volume ls -q --filter name=cassandra_hints) 2>/dev/null",
+                      shell=True, cwd=cfg.project_home)
+        docker_ops.restart_cassandra(cfg.project_home)
 
     console.print("[dim]  Waiting for Flask, Spark, MinIO, MLflow, Airflow...[/dim]")
     send_progress("infra_services", "running", "Waiting for Flask, Spark, MinIO, MLflow, Airflow...")

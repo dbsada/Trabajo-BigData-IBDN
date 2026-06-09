@@ -4,11 +4,10 @@ Se entiende que ya se han seguido los pasos de el [README](../README.md) para co
 
 ## Desplegar
 
-Para desplegar la aplicación, puedes usar el comando `predict` con el argumento `docker` y elegir la base de datos que quieres usar (Cassandra o MongoDB):
+Para desplegar la aplicación, puedes usar el comando `predict` con el argumento `docker`:
 
 ```shell
-predict docker --db cassandra   # POR DEFECTO
-predict docker --db mongo
+predict docker
 ```
 
 El comando mostrará por pantalla el progreso inicialización del entorno. Lo primero que se levantará será el contenedor de Flask. Se sugiere entrar en la url `http://localhost:5001`, donde se verá con mayor detalle el proceso de inicialización:
@@ -103,7 +102,7 @@ La vista de servicios muestra rápidamente el estado de cada servicio:
 
 ![Docker Services](../images/docker-services.png)
 
-En este caso, vemos como todos los servicios están activos, excepto mongodb, puesto que se está usando Cassandra como base de datos.
+En este caso, vemos como todos los servicios están activos.
 
 La otra vista es la terminal de logs, donde se muestran los logs de la aplicación. Es especialmente útil para ver el proceso de inicialización y detectar posibles errores:
 

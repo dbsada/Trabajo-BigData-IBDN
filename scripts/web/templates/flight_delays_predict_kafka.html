@@ -157,11 +157,7 @@ function getDropdown(input) {
   <rect x="58" y="150" width="194" height="62" rx="8" fill="none" stroke="#555" stroke-width="1" stroke-dasharray="3,3"/>
 
   <rect id="sv-bbdd" x="270" y="163" width="80" height="36" rx="6" fill="#1e1e2a" stroke="#2f9e44" stroke-width="2" class="sv-node"/>
-  {% if DB_MODE == 'cassandra' %}
   <text x="310" y="181" fill="#d0d0d8" font-size="10" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">CASSANDRA</text>
-  {% else %}
-  <text x="310" y="181" fill="#d0d0d8" font-size="11" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">MONGODB</text>
-  {% endif %}
 
   <rect id="sv-flask" x="60" y="280" width="180" height="40" rx="6" fill="#1e1e2a" stroke="#1971c2" stroke-width="2" class="sv-node"/>
   <text x="150" y="300" fill="#d0d0d8" font-size="12" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">FLASK</text>
@@ -204,7 +200,7 @@ function getDropdown(input) {
   <div id="train-modal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:#00000080;z-index:1000;justify-content:center;align-items:center">
     <div style="background:#1e1e2a;border:1px solid #2a2a3a;border-radius:10px;padding:1.2rem;width:360px;max-height:90vh;overflow-y:auto">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
-        <span style="color:#d0d0d8;font-size:0.9rem;font-weight:600">Train <input type="text" id="model-name-input" value="rf_training" style="background:#16161e;border:1px solid #2a2a3a;color:#d0d0d8;padding:0.15rem 0.4rem;border-radius:4px;font-size:0.85rem;outline:none;width:160px;font-family:inherit;font-weight:600"></span>
+        <span style="color:#d0d0d8;font-size:0.9rem;font-weight:600">Train <input type="text" id="model-name-input" value="rf_training" oninput="this.value=this.value.replace(/ /g,'_')" style="background:#16161e;border:1px solid #2a2a3a;color:#d0d0d8;padding:0.15rem 0.4rem;border-radius:4px;font-size:0.85rem;outline:none;width:160px;font-family:inherit;font-weight:600"></span>
         <span id="modal-close" style="color:#888;cursor:pointer;font-size:1.1rem">&times;</span>
       </div>
 
@@ -280,11 +276,7 @@ function getDropdown(input) {
       <option value="kafka">Kafka</option>
       <option value="spark">Spark</option>
       <option value="spark-worker">Spark Worker</option>
-      {% if DB_MODE == 'cassandra' %}
       <option value="cassandra">Cassandra</option>
-      {% else %}
-      <option value="mongodb">MongoDB</option>
-      {% endif %}
       <option value="flask">Flask</option>
       <option value="mlflow">MLflow</option>
       <option value="minio">MinIO</option>
@@ -359,6 +351,26 @@ function advanceArch() {
 }
 
 var _isTraining = false;
+var _trainWatchInterval = null;
+function startTrainWatch() {
+  if (_trainWatchInterval) clearInterval(_trainWatchInterval);
+  _trainWatchInterval = setInterval(function() {
+    fetch('/api/models/train/status').then(function(r) { return r.json(); }).then(function(s) {
+      if (s.status === 'running') {
+        var row = document.querySelector('.training-row');
+        if (!row) showTrainingRow(s.elapsed || 0);
+      } else if (s.status === 'completed') {
+        if (_trainWatchInterval) { clearInterval(_trainWatchInterval); _trainWatchInterval = null; }
+      } else if (s.status === 'idle') {
+        if (_isTraining && !document.querySelector('.training-row')) {
+          fetch('/api/models/train/status').then(function(r2) { return r2.json(); }).then(function(s2) {
+            if (s2.status === 'running') showTrainingRow(s2.elapsed || 0);
+          });
+        }
+      }
+    });
+  }, 3000);
+}
 function checkActiveModel() {
   fetch('/api/models').then(function(r) { return r.json(); }).then(function(data) {
     var btn = document.getElementById('predict-btn');
@@ -767,8 +779,16 @@ function loadModels() {
           btn.disabled = true;
           btn.style.opacity = '0.5';
           btn.style.cursor = 'not-allowed';
-          btn.textContent = 'Training…';
+          btn.textContent = 'Training\u2026';
           showTrainingRow(s.elapsed || 0);
+          checkActiveModel();
+        } else if (_pendingTrainingRow) {
+          _isTraining = true;
+          btn.disabled = true;
+          btn.style.opacity = '0.5';
+          btn.style.cursor = 'not-allowed';
+          btn.textContent = 'Training\u2026';
+          showTrainingRow(0);
           checkActiveModel();
         } else {
           _isTraining = false;
@@ -779,6 +799,11 @@ function loadModels() {
           checkActiveModel();
         }
       }).catch(function() {
+        if (_pendingTrainingRow) {
+          _isTraining = true;
+          showTrainingRow(0);
+          return;
+        }
         _isTraining = false;
         checkActiveModel();
       });
@@ -915,6 +940,7 @@ document.getElementById('start-train-btn').addEventListener('click', function() 
     modal.style.display = 'none';
     modelsLoaded = false;
     _pendingTrainingRow = true;
+    startTrainWatch();
     loadModels();
     setTimeout(function() {
       if (_pendingTrainingRow) {
@@ -971,6 +997,7 @@ function showTrainingRow(elapsed, progress) {
         if (!confirm('Cancel training?')) return;
         fetch('/api/models/train/cancel', { method: 'POST' });
         if (trainingPollTimer) { clearTimeout(trainingPollTimer); trainingPollTimer = null; }
+        if (_trainWatchInterval) { clearInterval(_trainWatchInterval); _trainWatchInterval = null; }
         var row = document.querySelector('.training-row');
         if (row) row.remove();
         _isTraining = false;
@@ -993,6 +1020,7 @@ function showTrainingRow(elapsed, progress) {
       trainingPollTimer = setTimeout(poll, 2000);
     } else if (s.status === 'completed') {
       trainingPollTimer = null;
+      if (_trainWatchInterval) { clearInterval(_trainWatchInterval); _trainWatchInterval = null; }
       _isTraining = false;
       var ts = document.querySelector('.train-elapsed');
       if (ts) ts.textContent = 'done';
@@ -1032,7 +1060,7 @@ function loadServices() {
   c.innerHTML = '<div style="text-align:center;padding:1rem;color:#555;font-size:0.85rem">Loading...</div>';
   fetch('/api/services/status').then(function(r) { return r.json(); }).then(function(d) {
     var html = '';
-      var ordered = ['kafka', 'spark', 'spark-worker', 'minio', 'mlflow', 'flask', 'cassandra', 'mongodb'];
+      var ordered = ['kafka', 'spark', 'spark-worker', 'minio', 'mlflow', 'flask', 'cassandra'];
     if (d.services && Object.keys(d.services).length > 0) {
       ordered.forEach(function(name) {
         var svc = d.services[name];

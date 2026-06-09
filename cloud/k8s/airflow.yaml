@@ -83,6 +83,7 @@ spec:
         command: ["bash", "-c"]
         args:
         - |
+          cp /config/dags/*.py /opt/airflow/dags/
           airflow db migrate
           python3 -c "
           import psycopg2
@@ -96,6 +97,11 @@ spec:
         env:
         - name: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN
           value: "postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow"
+        volumeMounts:
+        - name: dags
+          mountPath: /config/dags
+        - name: dags-target
+          mountPath: /opt/airflow/dags
       containers:
       - name: webserver
         image: europe-west1-docker.pkg.dev/REPLACE_PROJECT/ibdn/airflow:latest
@@ -108,29 +114,43 @@ spec:
           value: "false"
         - name: AIRFLOW_CONN_SPARK_MASTER
           value: "http://spark-manager:8080"
+        - name: AIRFLOW__API_AUTH__JWT_SECRET
+          value: "O217p0w5BdJmK9E82PVAPw=="
+        - name: AIRFLOW__API__SECRET_KEY
+          value: "acCXuJbBIpfnLu31LZtuUw=="
         - name: MLFLOW_TRACKING_URI
           valueFrom:
             configMapKeyRef:
               name: ibdn-config
               key: MLFLOW_TRACKING_URI
-        - name: _AIRFLOW_WWW_USER_USERNAME
-          value: "admin"
-        - name: _AIRFLOW_WWW_USER_PASSWORD
-          value: "admin"
-        - name: _AIRFLOW_WWW_USER_FIRSTNAME
-          value: "Admin"
-        - name: _AIRFLOW_WWW_USER_LASTNAME
-          value: "User"
-        - name: _AIRFLOW_WWW_USER_EMAIL
-          value: "admin@example.com"
-        - name: _AIRFLOW_WWW_USER_ROLE
-          value: "Admin"
-        command: ["airflow", "api-server"]
+        command: ["bash", "-c"]
+        args:
+        - |
+          PWFILE=/opt/airflow/simple_auth_manager_passwords.json.generated
+          airflow api-server &
+          APID=$!
+          for i in $(seq 1 60); do
+            if [ -f "$PWFILE" ] && [ -s "$PWFILE" ]; then
+              echo "Password for user admin: $(python3 -c "import json; print(json.load(open('$PWFILE')).get('admin',''))")"
+              break
+            fi
+            sleep 2
+          done
+          wait $APID
+        volumeMounts:
+        - name: dags-target
+          mountPath: /opt/airflow/dags
         resources:
           requests:
             memory: "256Mi"
           limits:
             memory: "512Mi"
+      volumes:
+      - name: dags
+        configMap:
+          name: airflow-dags
+      - name: dags-target
+        emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
@@ -158,9 +178,96 @@ spec:
       labels:
         app: airflow-scheduler
     spec:
+      initContainers:
+      - name: init
+        image: europe-west1-docker.pkg.dev/REPLACE_PROJECT/ibdn/airflow:latest
+        command: ["bash", "-c"]
+        args:
+        - |
+          cp /config/dags/*.py /opt/airflow/dags/
+        volumeMounts:
+        - name: dags
+          mountPath: /config/dags
+        - name: dags-target
+          mountPath: /opt/airflow/dags
       containers:
       - name: scheduler
         image: europe-west1-docker.pkg.dev/REPLACE_PROJECT/ibdn/airflow:latest
+        env:
+        - name: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN
+          value: "postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow"
+        - name: AIRFLOW__CORE__LOAD_EXAMPLES
+          value: "false"
+        - name: AIRFLOW__CORE__PARALLELISM
+          value: "1"
+        - name: AIRFLOW__CORE__EXECUTION_API_SERVER_URL
+          value: "http://airflow-webserver:8080/execution/"
+        - name: AIRFLOW__SCHEDULER__MAX_TIS_PER_QUERY
+          value: "1"
+        - name: AIRFLOW__API_AUTH__JWT_SECRET
+          value: "O217p0w5BdJmK9E82PVAPw=="
+        - name: AIRFLOW__API__SECRET_KEY
+          value: "acCXuJbBIpfnLu31LZtuUw=="
+        - name: MLFLOW_TRACKING_URI
+          valueFrom:
+            configMapKeyRef:
+              name: ibdn-config
+              key: MLFLOW_TRACKING_URI
+        command: ["airflow", "scheduler"]
+        volumeMounts:
+        - name: dags
+          mountPath: /config/dags
+        - name: dags-target
+          mountPath: /opt/airflow/dags
+        livenessProbe:
+          exec:
+            command: ["airflow", "jobs", "check", "--job-type", "SchedulerJob"]
+          initialDelaySeconds: 120
+          periodSeconds: 60
+          timeoutSeconds: 10
+        resources:
+          requests:
+            memory: "256Mi"
+          limits:
+            memory: "512Mi"
+      volumes:
+      - name: dags
+        configMap:
+          name: airflow-dags
+      - name: dags-target
+        emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-dag-processor
+  namespace: ibdn
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: airflow-dag-processor
+  template:
+    metadata:
+      labels:
+        app: airflow-dag-processor
+    spec:
+      initContainers:
+      - name: init
+        image: europe-west1-docker.pkg.dev/REPLACE_PROJECT/ibdn/airflow:latest
+        command: ["bash", "-c"]
+        args:
+        - |
+          cp /config/dags/*.py /opt/airflow/dags/
+        volumeMounts:
+        - name: dags
+          mountPath: /config/dags
+        - name: dags-target
+          mountPath: /opt/airflow/dags
+      containers:
+      - name: dag-processor
+        image: europe-west1-docker.pkg.dev/REPLACE_PROJECT/ibdn/airflow:latest
+        command: ["airflow", "dag-processor"]
         env:
         - name: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN
           value: "postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow"
@@ -171,9 +278,19 @@ spec:
             configMapKeyRef:
               name: ibdn-config
               key: MLFLOW_TRACKING_URI
-        command: ["airflow", "scheduler"]
+        volumeMounts:
+        - name: dags
+          mountPath: /config/dags
+        - name: dags-target
+          mountPath: /opt/airflow/dags
         resources:
           requests:
-            memory: "256Mi"
-          limits:
             memory: "512Mi"
+          limits:
+            memory: "1Gi"
+      volumes:
+      - name: dags
+        configMap:
+          name: airflow-dags
+      - name: dags-target
+        emptyDir: {}

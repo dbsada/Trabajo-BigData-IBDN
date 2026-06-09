@@ -1,11 +1,8 @@
 import sys, os, re
 import time
-import pymongo
 import datetime, iso8601
 
 def get_cassandra_session():
-  if os.getenv('DB_MODE', 'cassandra') != 'cassandra':
-    return None
   if not hasattr(get_cassandra_session, '_session'):
     try:
       from cassandra.cluster import Cluster
@@ -22,21 +19,16 @@ def get_cassandra_session():
       get_cassandra_session._session = None
   return get_cassandra_session._session
 
-def get_flight_distance(client, origin, dest):
-  db_mode = os.getenv('DB_MODE', 'cassandra')
-  if db_mode == 'cassandra':
-    session = get_cassandra_session()
-    if session:
-      row = session.execute(
-        "SELECT distance FROM origin_dest_distances WHERE origin=%s AND dest=%s",
-        (origin, dest)
-      ).one()
-      if row:
-        return row.distance
-    return None
-
-  record = client.agile_data_science.origin_dest_distances.find_one({"Origin": origin, "Dest": dest})
-  return record["Distance"]
+def get_flight_distance(origin, dest):
+  session = get_cassandra_session()
+  if session:
+    row = session.execute(
+      "SELECT distance FROM origin_dest_distances WHERE origin=%s AND dest=%s",
+      (origin, dest)
+    ).one()
+    if row:
+      return row.distance
+  return None
 
 def get_regression_date_args(iso_date):
   """Given an ISO Date, return the day of year, day of month, day of week as the API expects them."""

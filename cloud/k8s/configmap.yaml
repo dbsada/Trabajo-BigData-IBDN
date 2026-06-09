@@ -15,8 +15,6 @@ data:
   MINIO_ROOT_PASSWORD: "password"
   SPARK_MASTER_URL: "spark://spark-manager:7077"
   MLFLOW_TRACKING_URI: "http://mlflow:5000"
-  MONGODB_URI: "mongodb://mongodb:27017"
-  MONGODB_DATABASE: "agile_data_science"
   CASSANDRA_HOST: "cassandra"
   CASSANDRA_PORT: "9042"
   DB_MODE: "cassandra"

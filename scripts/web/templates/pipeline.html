@@ -166,6 +166,11 @@ body {
       });
 
       socket.on('connect', () => {
+        checkPipelineProgress();
+        setInterval(checkPipelineProgress, 5000);
+      });
+
+      function checkPipelineProgress() {
         fetch('/api/pipeline/progress')
           .then(r => r.json())
           .then(state => {
@@ -176,7 +181,7 @@ body {
             }
           })
           .catch(() => {});
-      });
+      }
 
       function fetchLogs() {
         fetch('/api/logs/all')

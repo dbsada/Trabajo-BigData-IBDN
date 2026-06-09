@@ -7,12 +7,12 @@ from utils.network import check_port
 from config import DeployConfig
 
 @sh
-def compose_up(project_home, db):
-    return f"cd \"{project_home}\" && docker compose --profile db_{db} up -d"
+def compose_up(project_home):
+    return f"cd \"{project_home}\" && docker compose --profile db_cassandra up -d"
 
 @sh
 def compose_down(project_home):
-    return f"cd \"{project_home}\" && docker compose --profile db_mongo --profile db_cassandra down --remove-orphans"
+    return f"cd \"{project_home}\" && docker compose --profile db_cassandra down --remove-orphans"
 
 @sh
 def compose_logs(service_name, log_file):
@@ -26,7 +26,7 @@ def less_file(log_file):
 def lsof_port(port):
     return f"lsof -i :{port} -sTCP:LISTEN"
 
-def check_ports_busy(cfg):
+def check_ports_busy():
     ports_to_check = [
         ("Spark UI",      int(os.getenv('SPARK_MASTER_UI_PORT', '8080'))),
         ("Spark Master",  int(os.getenv('SPARK_MASTER_PORT', '7077'))),
@@ -37,11 +37,8 @@ def check_ports_busy(cfg):
         ("MLflow",        int(os.getenv('MLFLOW_PORT', '5003'))),
         ("Airflow",       int(os.getenv('AIRFLOW_UI_PORT', '8085'))),
         ("Postgres",      int(os.getenv('AIRFLOW_POSTGRES_PORT', '5432'))),
+        ("Cassandra",     int(os.getenv('CASSANDRA_PORT', '9042'))),
     ]
-    if cfg.db_mode == 'mongo':
-        ports_to_check.append(("MongoDB", int(os.getenv('MONGODB_PORT', '27017'))))
-    else:
-        ports_to_check.append(("Cassandra", int(os.getenv('CASSANDRA_PORT', '9042'))))
     return [(name, port) for name, port in ports_to_check if check_port(port)]
 
 def show_service_logs(service_name):
@@ -112,16 +109,16 @@ def is_cassandra_healthy():
 def restart_cassandra(project_home):
     return f"cd \"{project_home}\" && docker compose --profile db_cassandra up -d cassandra"
 
-def start_services(cfg):
+def start_services():
     from rich.live import Live
     from rich.align import Align
     from rich.table import Table
     from rich.text import Text
 
     logging.info('Starting services with Docker Compose...')
-    os.environ['DB_MODE'] = cfg.db_mode
+    os.environ['DB_MODE'] = 'cassandra'
 
-    busy = check_ports_busy(cfg)
+    busy = check_ports_busy()
     if busy:
         from rich.panel import Panel
         msg = "[bold red]Ports occupied detected:[/bold red]\n\n"
@@ -154,10 +151,10 @@ def start_services(cfg):
         msg += "\nFree the ports or change the configuration in .env before continuing."
         raise RuntimeError(msg)
 
-    compose_up(cfg.project_home, cfg.db_mode)
+    compose_up(cfg.project_home)
 
-    db_label = "MongoDB" if cfg.db_mode == 'mongo' else "Cassandra"
-    db_port = int(os.getenv('MONGODB_PORT', '27017')) if cfg.db_mode == 'mongo' else int(os.getenv('CASSANDRA_PORT', '9042'))
+    db_label = "Cassandra"
+    db_port = int(os.getenv('CASSANDRA_PORT', '9042'))
 
     services = [
         {"name": "Kafka",   "port": int(os.getenv('KAFKA_PORT', '9092')),         "ready": False},
@@ -232,16 +229,16 @@ def start_services(cfg):
 
 def start_services_silent(cfg):
     logging.info('Starting services with Docker Compose...')
-    os.environ['DB_MODE'] = cfg.db_mode
+    os.environ['DB_MODE'] = 'cassandra'
 
-    busy = check_ports_busy(cfg)
+    busy = check_ports_busy()
     if busy:
         names = [f"{n} ({p})" for n, p in busy]
         raise RuntimeError(f"Ports occupied: {', '.join(names)}. Free them or change .env before continuing.")
 
-    compose_up(cfg.project_home, cfg.db_mode)
+    compose_up(cfg.project_home)
 
-    db_port = int(os.getenv('MONGODB_PORT', '27017')) if cfg.db_mode == 'mongo' else int(os.getenv('CASSANDRA_PORT', '9042'))
+    db_port = int(os.getenv('CASSANDRA_PORT', '9042'))
 
     services = [
         {"name": "Kafka",   "port": int(os.getenv('KAFKA_PORT', '9092')),         "ready": False},
@@ -260,7 +257,7 @@ def start_services_silent(cfg):
             if s["ready"]:
                 continue
             if check_port(s["port"]):
-                if s["name"] == "DB" and cfg.db_mode == 'cassandra':
+                if s["name"] == "DB":
                     if not cassandra_nodetool_pending and not cassandra_cql_pending:
                         cassandra_nodetool_pending = True
                 else:

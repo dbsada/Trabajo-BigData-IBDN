@@ -1,9 +1,10 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: spark-worker
   namespace: ibdn
 spec:
+  serviceName: spark-worker
   replicas: 3
   selector:
     matchLabels:
@@ -13,6 +14,9 @@ spec:
       labels:
         app: spark-worker
     spec:
+      dnsConfig:
+        searches:
+          - spark-worker.ibdn.svc.cluster.local
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
@@ -42,10 +46,22 @@ spec:
           value: "4"
         resources:
           requests:
-            memory: "4Gi"
+            memory: "2Gi"
           limits:
-            memory: "7Gi"
+            memory: "4Gi"
         command:
-        - /opt/spark/bin/spark-class
-        - org.apache.spark.deploy.worker.Worker
-        - $(SPARK_MASTER)
+        - /bin/sh
+        - -c
+        - /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker $SPARK_MASTER
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-worker
+  namespace: ibdn
+spec:
+  clusterIP: None
+  selector:
+    app: spark-worker
+  ports:
+  - port: 8081

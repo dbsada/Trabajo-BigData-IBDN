@@ -15,7 +15,6 @@ SERVICE_COLORS = {
     'spark-manager': '#fdc41b',
     'spark-worker': '#e05a5a',
     'cassandra': '#2f9e44',
-    'mongodb': '#2f9e44',
     'flask': '#1971c2',
     'minio': '#e05a5a',
     'mlflow': '#60a5fa',
@@ -62,13 +61,9 @@ def _k8s_api_get(path):
     r.raise_for_status()
     return r.text
 
-def _collect_docker_logs(client, services, db_mode):
+def _collect_docker_logs(client, services):
     all_lines = []
-    service_list = list(services)
-    if db_mode == 'mongodb':
-        service_list.append('mongodb')
-    else:
-        service_list.append('cassandra')
+    service_list = list(services) + ['cassandra']
 
     for name in service_list:
         try:
@@ -247,13 +242,9 @@ class Logs:
         return os.getenv("DEPLOY_MODE", "") == "gke"
 
     @staticmethod
-    def get_all_logs(db_mode):
+    def get_all_logs():
         if Logs._in_gke():
-            base_services = ['kafka', 'spark-manager', 'spark-worker', 'flask', 'minio', 'mlflow', 'airflow-webserver', 'airflow-scheduler', 'airflow-postgres']
-            if db_mode == 'mongodb':
-                base_services.append('mongodb')
-            else:
-                base_services.append('cassandra')
+            base_services = ['kafka', 'spark-manager', 'spark-worker', 'flask', 'minio', 'mlflow', 'airflow-webserver', 'airflow-scheduler', 'airflow-postgres', 'cassandra']
             try:
                 all_lines = _gke_collect_pod_logs(base_services, tail_lines=300)
                 _gke_collect_spark_stdout(all_lines)
@@ -267,7 +258,7 @@ class Logs:
         try:
             client = Logs._docker_client()
             base_services = ['kafka', 'spark-manager', 'spark-worker', 'flask', 'minio', 'mlflow', 'airflow-webserver', 'airflow-scheduler', 'airflow-postgres']
-            all_lines = _collect_docker_logs(client, base_services, db_mode)
+            all_lines = _collect_docker_logs(client, base_services)
             _collect_spark_stdout(client, all_lines)
             all_lines.sort(key=lambda x: x[0])
             all_lines = all_lines[-1000:]

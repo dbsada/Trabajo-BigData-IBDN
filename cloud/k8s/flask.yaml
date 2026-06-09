@@ -19,6 +19,10 @@ spec:
         image: europe-west1-docker.pkg.dev/REPLACE_PROJECT/ibdn/flask:latest
         ports:
         - containerPort: 5001
+        volumeMounts:
+        - name: flask-code-patch
+          mountPath: /app/scripts/web/predict_flask.py
+          subPath: predict_flask.py
         envFrom:
         - configMapRef:
             name: ibdn-config
@@ -38,6 +42,10 @@ spec:
             memory: "256Mi"
           limits:
             memory: "512Mi"
+      volumes:
+      - name: flask-code-patch
+        configMap:
+          name: flask-code-patch
 ---
 apiVersion: v1
 kind: Service

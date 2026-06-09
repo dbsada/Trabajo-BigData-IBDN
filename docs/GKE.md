@@ -6,11 +6,10 @@ En realidad el proceso es muy similar al de Docker, por lo que se solicita al le
 
 ## Desplegar
 
-Para desplegar la aplicación, puedes usar el comando `predict` con el argumento `gke` y elegir la base de datos que quieres usar (Cassandra o MongoDB):
+Para desplegar la aplicación, puedes usar el comando `predict` con el argumento `gke`:
 
 ```shell
-predict gke --db cassandra   # POR DEFECTO
-predict gke --db mongo
+predict gke
 ```
 
 ## Diferencias en la interfaz

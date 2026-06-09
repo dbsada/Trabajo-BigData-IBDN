@@ -64,13 +64,14 @@ object MakePrediction {
     val rfc = RandomForestClassificationModel.load(randomForestModelPath)
 
     println("[SPARK] All models loaded. Starting Kafka streaming...")
+    val checkpointBase = s"/opt/spark/checkpoint/spark_checkpoint_$modelVersion"
 
     val df = spark
       .readStream
       .format("kafka")
       .option("kafka.bootstrap.servers", "kafka:9092")
       .option("subscribe", "flight-delay-ml-request")
-      .option("startingOffsets", "latest")
+      .option("startingOffsets", "earliest")
       .load()
     df.printSchema()
 
@@ -80,7 +81,7 @@ object MakePrediction {
       .format("kafka")
       .option("kafka.bootstrap.servers", "kafka:9092")
       .option("topic", "flight-delay-ml-status")
-      .option("checkpointLocation", "/opt/spark/checkpoint/spark_checkpoint_status")
+      .option("checkpointLocation", s"${checkpointBase}_status")
       .outputMode("append")
       .start()
 
@@ -122,16 +123,6 @@ object MakePrediction {
 
     val predictions = rfc.transform(vectorizedFeatures)
 
-    val kafkaSink = predictions
-      .selectExpr("CAST(UUID AS STRING) as key", "to_json(struct(*)) as value")
-      .writeStream
-      .format("kafka")
-      .option("kafka.bootstrap.servers", "kafka:9092")
-      .option("topic", "flight-delay-ml-response")
-      .option("checkpointLocation", "/opt/spark/checkpoint/spark_checkpoint_kafka")
-      .outputMode("append")
-      .start()
-
     val loggingSink = predictions.writeStream
       .foreachBatch { (batchDF: DataFrame, batchId: Long) =>
         val rows = batchDF.collect()
@@ -147,8 +138,20 @@ object MakePrediction {
             val delayLabel = if (prediction == 0) "ON_TIME" else "DELAYED"
             println(s"[SPARK] PREDICTION: UUID=${uuid.take(12)}... | $carrier $origin->$dest | DepDelay=$depDelay | Result=$delayLabel (class=$prediction)")
           }
+          // Write to Kafka response topic directly from foreachBatch
+          val responseDF = batchDF.selectExpr(
+            "CAST(UUID AS STRING) as key",
+            "to_json(named_struct('UUID', UUID, 'Origin', Origin, 'Dest', Dest, 'Carrier', Carrier, 'FlightDate', FlightDate, 'FlightNum', FlightNum, 'DepDelay', DepDelay, 'Distance', Distance, 'Route', Route, 'DayOfYear', DayOfYear, 'DayOfMonth', DayOfMonth, 'DayOfWeek', DayOfWeek, 'Prediction', Prediction)) as value"
+          )
+          responseDF.write
+            .format("kafka")
+            .option("kafka.bootstrap.servers", "kafka:9092")
+            .option("topic", "flight-delay-ml-response")
+            .save()
+          println(s"[SPARK] Written ${rows.length} response(s) to Kafka")
         }
       }
+      .option("checkpointLocation", s"${checkpointBase}_prediction")
       .outputMode("update")
       .start()
 
