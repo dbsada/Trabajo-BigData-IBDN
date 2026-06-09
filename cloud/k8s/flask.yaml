@@ -23,6 +23,9 @@ spec:
         - name: flask-code-patch
           mountPath: /app/scripts/web/predict_flask.py
           subPath: predict_flask.py
+        - name: flask-code-patch
+          mountPath: /app/scripts/web/predict_utils.py
+          subPath: predict_utils.py
         envFrom:
         - configMapRef:
             name: ibdn-config

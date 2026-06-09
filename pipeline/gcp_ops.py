@@ -149,7 +149,7 @@ def substitute_image_refs(cfg):
 
 @sh
 def _kubectl_apply_k8s(manifest_dir):
-    return f"kubectl apply -f {manifest_dir} --validate=false"
+    return f"kubectl apply -f {manifest_dir} --validate=false --request-timeout=60s"
 
 
 def deploy_k8s(gcp, cfg=None):
@@ -162,10 +162,19 @@ def deploy_k8s(gcp, cfg=None):
         subprocess.run("gcloud components install gke-gcloud-auth-plugin --quiet",
                       shell=True, check=True)
 
+    # Wait for API server to be ready
+    for _ in range(30):
+        r = subprocess.run("kubectl cluster-info 2>/dev/null", shell=True, capture_output=True)
+        if r.returncode == 0:
+            break
+        logging.info("Waiting for Kubernetes API server...")
+        time.sleep(10)
+
     # Create required ConfigMaps from source files
     project_home = cfg.project_home if cfg else os.path.dirname(CLOUD_DIR)
     configmaps = {
-        "flask-code-patch": {"predict_flask.py": os.path.join(project_home, "scripts", "web", "predict_flask.py")},
+        "flask-code-patch": {"predict_flask.py": os.path.join(project_home, "scripts", "web", "predict_flask.py"),
+                             "predict_utils.py": os.path.join(project_home, "scripts", "web", "predict_utils.py")},
         "airflow-dags": {"train_flight_delay_model.py": os.path.join(project_home, "dags", "train_flight_delay_model.py")},
     }
     for cm_name, files in configmaps.items():
@@ -174,18 +183,17 @@ def deploy_k8s(gcp, cfg=None):
             if os.path.exists(path):
                 cm_cmd += f" --from-file={key}={path}"
         cm_cmd += " | kubectl apply -f -"
-        subprocess.run(cm_cmd, shell=True, capture_output=True)
-        logging.info(f"ConfigMap {cm_name} created/updated")
+        subprocess.run(cm_cmd, shell=True, check=True)
 
     manifest_dir = substitute_image_refs(gcp)
-    for attempt in range(3):
+    for attempt in range(5):
         r = _kubectl_apply_k8s(manifest_dir)
         if r.returncode == 0:
             break
-        logging.warning(f"kubectl apply failed (attempt {attempt+1}/3), retrying...")
+        logging.warning(f"kubectl apply failed (attempt {attempt+1}/5), retrying...")
         time.sleep(10)
     else:
-        raise RuntimeError("kubectl apply failed after 3 attempts")
+        raise RuntimeError("kubectl apply failed after 5 attempts")
     import shutil
     shutil.rmtree(manifest_dir, ignore_errors=True)
     logging.info("Waiting for pods to be ready...")

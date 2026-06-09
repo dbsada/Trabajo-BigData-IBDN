@@ -3,21 +3,23 @@ import time
 import datetime, iso8601
 
 def get_cassandra_session():
-  if not hasattr(get_cassandra_session, '_session'):
-    try:
-      from cassandra.cluster import Cluster
-      cluster = Cluster(['cassandra'], port=9042)
-      for _ in range(5):
-        try:
-          get_cassandra_session._session = cluster.connect('agile_data_science')
-          break
-        except Exception:
-          time.sleep(2)
-      if not hasattr(get_cassandra_session, '_session'):
-        get_cassandra_session._session = None
-    except Exception:
-      get_cassandra_session._session = None
-  return get_cassandra_session._session
+  session = getattr(get_cassandra_session, '_session', None)
+  if session is not None:
+    return session
+  try:
+    from cassandra.cluster import Cluster
+    cluster = Cluster(['cassandra'], port=9042)
+    for _ in range(5):
+      try:
+        session = cluster.connect('agile_data_science')
+        get_cassandra_session._session = session
+        return session
+      except Exception:
+        time.sleep(2)
+  except Exception:
+    pass
+  get_cassandra_session._session = None
+  return None
 
 def get_flight_distance(origin, dest):
   session = get_cassandra_session()

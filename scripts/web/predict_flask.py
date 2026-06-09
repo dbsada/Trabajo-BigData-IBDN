@@ -1176,67 +1176,79 @@ def on_subscribe(data):
 
 # Start Kafka consumers
 def _kafka_response_listener():
-  consumer = KafkaConsumer(
-    KAFKA_RESPONSE_TOPIC,
-    bootstrap_servers=[KAFKA_BOOTSTRAP_SERVERS],
-    auto_offset_reset='earliest',
-    group_id='flask-prediction-consumer'
-  )
-  for msg in consumer:
+  while True:
     try:
-      data = json.loads(msg.value.decode('utf-8'))
-      if isinstance(data, dict) and 'UUID' in data:
-        print(f"Consumer processing UUID: {data['UUID'][:12]} ...")
-        socketio.emit('spark_status', {'status': 'PROCESSING'}, room=data.get('UUID', ''))
-        # Inline save to file cache  
-        import json as _jj
-        import os as _oo
-        _cf = '/tmp/prediction_cache.json'
-        _cd = {}
-        if _oo.path.exists(_cf):
-          try:
-            with open(_cf) as _ff: _cd = _jj.load(_ff)
-          except: _cd = {}
-        _cd[data.get("UUID", "")] = data
-        if len(_cd) > 50:
-          _cd = dict(list(_cd.items())[-50:])
-        with open(_cf, 'w') as _ff: _jj.dump(_cd, _ff)
-        print(f"SAVED TO CACHE: {data.get('UUID','')[:12]}")
-        session = predict_utils.get_cassandra_session()
-        if session:
-          session.execute("""
-            INSERT INTO agile_data_science.flight_delay_ml_response (
-              uuid, prediction, origin, dest, dep_delay, carrier,
-              flight_date, flight_num, distance, route,
-              day_of_year, day_of_month, day_of_week, timestamp
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-          """, (
-            data.get('UUID'), int(data.get('Prediction', 0)),
-            data.get('Origin'), data.get('Dest'), float(data.get('DepDelay', 0.0)),
-            data.get('Carrier'), data.get('FlightDate'), data.get('FlightNum'),
-            data.get('Distance'), data.get('Route'),
-            int(data.get('DayOfYear', 0)), int(data.get('DayOfMonth', 0)), int(data.get('DayOfWeek', 0)),
-            str(data.get('Timestamp', ''))
-          ))
-        print(f"Consumer: saved event for {data['UUID'][:12]}")
-        socketio.emit('saved', data, room=data.get('UUID', ''))
-        socketio.emit('prediction', data, room=data.get('UUID', ''))
+      consumer = KafkaConsumer(
+        KAFKA_RESPONSE_TOPIC,
+        bootstrap_servers=[KAFKA_BOOTSTRAP_SERVERS],
+        auto_offset_reset='earliest',
+        group_id='flask-prediction-consumer',
+        max_poll_interval_ms=300000,
+      )
+      for msg in consumer:
+        try:
+          data = json.loads(msg.value.decode('utf-8'))
+          if isinstance(data, dict) and 'UUID' in data:
+            print(f"Consumer processing UUID: {data['UUID'][:12]} ...")
+            socketio.emit('spark_status', {'status': 'PROCESSING'}, room=data.get('UUID', ''))
+            import json as _jj
+            import os as _oo
+            _cf = '/tmp/prediction_cache.json'
+            _cd = {}
+            if _oo.path.exists(_cf):
+              try:
+                with open(_cf) as _ff: _cd = _jj.load(_ff)
+              except: _cd = {}
+            _cd[data.get("UUID", "")] = data
+            if len(_cd) > 50:
+              _cd = dict(list(_cd.items())[-50:])
+            with open(_cf, 'w') as _ff: _jj.dump(_cd, _ff)
+            print(f"SAVED TO CACHE: {data.get('UUID','')[:12]}")
+            session = predict_utils.get_cassandra_session()
+            if session:
+              session.execute("""
+                INSERT INTO agile_data_science.flight_delay_ml_response (
+                  uuid, prediction, origin, dest, dep_delay, carrier,
+                  flight_date, flight_num, distance, route,
+                  day_of_year, day_of_month, day_of_week, timestamp
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+              """, (
+                data.get('UUID'), int(data.get('Prediction', 0)),
+                data.get('Origin'), data.get('Dest'), float(data.get('DepDelay', 0.0)),
+                data.get('Carrier'), data.get('FlightDate'), data.get('FlightNum'),
+                data.get('Distance'), data.get('Route'),
+                int(data.get('DayOfYear', 0)), int(data.get('DayOfMonth', 0)), int(data.get('DayOfWeek', 0)),
+                str(data.get('Timestamp', ''))
+              ))
+            print(f"Consumer: saved event for {data['UUID'][:12]}")
+            socketio.emit('saved', data, room=data.get('UUID', ''))
+            socketio.emit('prediction', data, room=data.get('UUID', ''))
+        except Exception as e:
+          print(f"Consumer processing error: {e}")
     except Exception as e:
-      print(f"Consumer error: {e}")
+      print(f"Consumer connection error: {e}, restarting in 5s...")
+      import time as _t
+      _t.sleep(5)
 
 def _kafka_status_listener():
-  consumer = KafkaConsumer(
-    KAFKA_STATUS_TOPIC,
-    bootstrap_servers=[KAFKA_BOOTSTRAP_SERVERS],
-    auto_offset_reset='latest'
-  )
-  for msg in consumer:
+  while True:
     try:
-      status = msg.value.decode('utf-8')
-      print(f"Status event: {status}")
-      socketio.emit('spark_status', {'status': status})
+      consumer = KafkaConsumer(
+        KAFKA_STATUS_TOPIC,
+        bootstrap_servers=[KAFKA_BOOTSTRAP_SERVERS],
+        auto_offset_reset='latest'
+      )
+      for msg in consumer:
+        try:
+          status = msg.value.decode('utf-8')
+          print(f"Status event: {status}")
+          socketio.emit('spark_status', {'status': status})
+        except Exception as e:
+          print(f"Status error: {e}")
     except Exception as e:
-      print(f"Status error: {e}")
+      print(f"Status consumer error: {e}, restarting in 5s...")
+      import time as _t
+      _t.sleep(5)
 
 _kafka_response_listener_thread = threading.Thread(target=_kafka_response_listener, daemon=True)
 _kafka_response_listener_thread.start()
