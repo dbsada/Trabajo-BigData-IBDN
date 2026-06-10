@@ -170,6 +170,9 @@ def deploy_k8s(gcp, cfg=None):
         logging.info("Waiting for Kubernetes API server...")
         time.sleep(10)
 
+    # Ensure namespace exists before creating ConfigMaps
+    subprocess.run("kubectl create namespace ibdn --dry-run=client -o yaml | kubectl apply -f -", shell=True, check=True)
+
     # Create required ConfigMaps from source files
     project_home = cfg.project_home if cfg else os.path.dirname(CLOUD_DIR)
     configmaps = {

@@ -61,16 +61,28 @@ def run_pipeline_gke(cfg):
         gcp_ops.deploy_k8s(gcp, cfg)
 
         console.print("[bold green]Deployment submitted![/bold green]")
+        console.print("[dim]Waiting for nodes to be ready...[/dim]")
+        expected_nodes = int(os.getenv('GKE_NUM_NODES', '3'))
+        for attempt in range(15):
+            r = subprocess.run(
+                "kubectl get nodes -o jsonpath='{.items[?(@.status.conditions[?(@.type==\"Ready\")].status==\"True\")].metadata.name}' 2>/dev/null | wc -w",
+                shell=True, capture_output=True, text=True
+            )
+            if r.stdout.strip() and int(r.stdout.strip()) >= expected_nodes:
+                console.print(f"[dim]  {r.stdout.strip()} nodes ready[/dim]")
+                break
+            console.print(f"[yellow]  Waiting for nodes (attempt {attempt+1}/15)...[/yellow]")
+            subprocess.run("sleep 15", shell=True)
         console.print("[dim]Waiting for key pods to be ready...[/dim]")
         for app in ["spark-manager", "flask", "minio", "kafka", "cassandra"]:
-            for attempt in range(3):
+            for attempt in range(5):
                 r = subprocess.run(
-                    f"kubectl wait --for=condition=ready pod -l app={app} -n ibdn --timeout=120s 2>/dev/null",
+                    f"kubectl wait --for=condition=ready pod -l app={app} -n ibdn --timeout=60s 2>/dev/null",
                     shell=True
                 )
                 if r.returncode == 0:
                     break
-                console.print(f"[yellow]  Waiting for {app} (attempt {attempt+1}/3)...[/yellow]")
+                console.print(f"[yellow]  Waiting for {app} (attempt {attempt+1}/5)...[/yellow]")
                 subprocess.run("sleep 10", shell=True)
         console.print("[dim]Giving Spark master a moment to bind port 7077...[/dim]")
         subprocess.run("sleep 15", shell=True)

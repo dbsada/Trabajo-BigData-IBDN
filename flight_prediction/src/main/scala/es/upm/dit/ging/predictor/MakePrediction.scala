@@ -52,7 +52,7 @@ object MakePrediction {
     val stringIndexerModel = columns.map { n =>
       val path = s"$base_path/models/string_indexer_model_$n.bin"
       println(s"[SPARK] Loading string indexer: $path")
-      StringIndexerModel.load(path)
+      StringIndexerModel.load(path).setHandleInvalid("keep")
     }
 
     val vectorAssemblerPath = s"$base_path/models/numeric_vector_assembler.bin"
@@ -138,10 +138,18 @@ object MakePrediction {
             val delayLabel = if (prediction == 0) "ON_TIME" else "DELAYED"
             println(s"[SPARK] PREDICTION: UUID=${uuid.take(12)}... | $carrier $origin->$dest | DepDelay=$depDelay | Result=$delayLabel (class=$prediction)")
           }
+          import org.apache.spark.sql.functions.{col, struct, to_json}
           // Write to Kafka response topic directly from foreachBatch
-          val responseDF = batchDF.selectExpr(
-            "CAST(UUID AS STRING) as key",
-            "to_json(named_struct('UUID', UUID, 'Origin', Origin, 'Dest', Dest, 'Carrier', Carrier, 'FlightDate', FlightDate, 'FlightNum', FlightNum, 'DepDelay', DepDelay, 'Distance', Distance, 'Route', Route, 'DayOfYear', DayOfYear, 'DayOfMonth', DayOfMonth, 'DayOfWeek', DayOfWeek, 'Prediction', Prediction)) as value"
+          val requiredCols = Seq("UUID", "Origin", "Dest", "Carrier", "Route", "FlightNum")
+          val validDF = requiredCols.foldLeft(batchDF) { (df, c) => df.filter(col(c).isNotNull) }
+          val responseDF = validDF.select(
+            col("UUID").cast("string").as("key"),
+            to_json(struct(
+              col("UUID"), col("Origin"), col("Dest"), col("Carrier"),
+              col("FlightDate"), col("FlightNum"), col("DepDelay"),
+              col("Distance"), col("Route"),
+              col("DayOfYear"), col("DayOfMonth"), col("DayOfWeek"), col("Prediction")
+            )).as("value")
           )
           responseDF.write
             .format("kafka")

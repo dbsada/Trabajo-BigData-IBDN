@@ -1710,6 +1710,11 @@ def classify_flight_delays_realtime():
   unique_id = str(uuid.uuid4())
   prediction_features['UUID'] = unique_id
   
+  # Ensure no string fields are None (Spark StringIndexer rejects nulls)
+  for key in ['FlightNum', 'Carrier']:
+      if prediction_features.get(key) is None:
+          prediction_features[key] = ''
+  
   message_bytes = json.dumps(prediction_features).encode()
   p = get_producer()
   try:

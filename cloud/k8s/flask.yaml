@@ -20,12 +20,8 @@ spec:
         ports:
         - containerPort: 5001
         volumeMounts:
-        - name: flask-code-patch
-          mountPath: /app/scripts/web/predict_flask.py
-          subPath: predict_flask.py
-        - name: flask-code-patch
-          mountPath: /app/scripts/web/predict_utils.py
-          subPath: predict_utils.py
+        - name: flask-patches
+          mountPath: /app/patches
         envFrom:
         - configMapRef:
             name: ibdn-config
@@ -40,13 +36,18 @@ spec:
           value: "gke"
         - name: FLASK_PORT
           value: "5001"
+        command: ["bash", "-c"]
+        args:
+        - |
+          cp /app/patches/*.py /app/scripts/web/ 2>/dev/null || true
+          python3 scripts/web/predict_flask.py
         resources:
           requests:
             memory: "256Mi"
           limits:
             memory: "512Mi"
       volumes:
-      - name: flask-code-patch
+      - name: flask-patches
         configMap:
           name: flask-code-patch
 ---

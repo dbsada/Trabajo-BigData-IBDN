@@ -36,10 +36,13 @@ cp .env.example .env
 Edita el archivo `.env` con tu configuración. Necesitas cambiar:
 - **`PROJECT_HOME`**: Ruta absoluta a tu directorio de proyecto.
 - `GCP_PROJECT`: ID de tu proyecto en Google Cloud (si vas a usar Google Cloud).
-- `GCP_ZONE`: Zona de Google Cloud donde desplegarás (si vas a usar Google Cloud).
+- `GCP_ZONE`: Zona donde desplegarás (si vas a usar Google Cloud).
 
-#### 4. Configurar proyecto GCloud (opcional):
-Es necesario tener instalado el SDK de Google Cloud y autenticado para desplegar en Google Cloud o GKE. Si no lo tienes, puedes descargarlo e instalarlo desde [aquí](https://cloud.google.com/sdk/docs/install) (también está disponible en [homebrew](https://formulae.brew.sh/cask/gcloud-cli)).
+#### 4. Instalar Docker:
+Si no tienes Docker instalado, puedes descargarlo e instalarlo desde [aquí](https://www.docker.com/products/docker-desktop). Asegúrate de que Docker esté funcionando correctamente antes de continuar. Tambien puedes instalarlo usando [homebrew](https://formulae.brew.sh/formula/docker).
+
+#### 5. Configurar proyecto GCloud (opcional):
+Es necesario tener instalado el SDK de Google Cloud y autenticado para desplegar en GKE. Si no lo tienes, puedes descargarlo e instalarlo desde [aquí](https://cloud.google.com/sdk/docs/install) (también está disponible en [homebrew](https://formulae.brew.sh/cask/gcloud-cli)).
 
 ```shell
 gcloud auth login
@@ -54,11 +57,29 @@ predict docker   # Para desplegar localmente con Docker Compose
 predict gke      # Para desplegar en Google Kubernetes Engine
 ```
 
-¡La aplicación está lista! Para entender la interfaz, puedes leer:
-- [Instrucciones docker](docs/DOCKER.md)
-- [Instrucciones gke](docs/GKE.md)
+¡La aplicación está lista! Ahora deberás abrir tu navegador y acceder a `http://localhost:5001` para ver la aplicación en acción. A continuación, puedes ver como entrenar un modelo y como realizar una predicción:
+
+Nada más entrar en la aplicación, deberás entrenar un modelo. Sin el, no podrás realizar predicciones (no se han incluido modelos entrenados).
+
+**Entrenar modelo (Flask):**
+
+![Entrenamiento Flask](images/train_via_flask.gif)
+
+> [!WARNING]
+> Si no ves el contador de progreso, no te preocupes, se trata de un bug visual que no afecta al funcionamiento de la aplicación. Recarga la página hasta que empieces a verlo. No trates de entrenar otro modelo.
+
+**Entrenar modelo (Airflow):**
+![Entrenamiento Airflow](images/train_via_airflow.gif)
+
+**Realizar predicción:**
+
 
 Cada uno irá detallando los pasos específicos de cada modo de despliegue, incluyendo capturas de pantalla para facilitar la comprensión.
+
+## Arquitectura:
+La arqutitectura de la aplicación se compone de varios servicios que interactúan entre sí para proporcionar dos funcionalidades: entrenamiento de modelos y predicción de retrasos de vuelos:
+
+![Arquitectura](images/arquitectura.png)
 
 ## Autores:
 - [Diego Besada](https://github.com/dbsada)
