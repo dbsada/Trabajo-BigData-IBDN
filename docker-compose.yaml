@@ -76,6 +76,27 @@ services:
         limits:
           memory: 7G
 
+  spark-worker-2:
+    container_name: spark-worker-2
+    build:
+      context: .
+      dockerfile: docker/dockerfile.spark
+    depends_on:
+      - spark-manager
+    volumes:
+      - .:/app
+    working_dir: /app
+    environment:
+      - SPARK_MASTER=spark://spark-manager:7077
+      - SPARK_WORKER_MEMORY=6G
+      - SPARK_WORKER_CORES=8
+      - MLFLOW_TRACKING_URI=${MLFLOW_URI:-http://mlflow:5000}
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-manager:7077
+    deploy:
+      resources:
+        limits:
+          memory: 7G
+
   flask:
     container_name: flask
     build:

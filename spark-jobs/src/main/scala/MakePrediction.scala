@@ -161,7 +161,8 @@ object MakePrediction {
                     col("Origin"), col("Dest"), col("Carrier"),
                     col("FlightDate"), col("FlightNum"), col("DepDelay"),
                     col("Distance"), col("Route"),
-                    col("DayOfYear"), col("DayOfMonth"), col("DayOfWeek"), col("Prediction")
+                    col("DayOfYear"), col("DayOfMonth"), col("DayOfWeek"),
+                    col("Prediction"), col("Timestamp")
                   )).as("value")
                 )
                 resultadoFinal = if (resultadoFinal == null) conModelId
