@@ -49,6 +49,8 @@ def send_prediction(form_data: dict, model_ids: list) -> str:
     prediction["Timestamp"] = utils.get_current_timestamp()
     prediction["UUID"] = unique_id
     prediction["model_ids"] = json.dumps(model_ids)
+    if "DepDelay" in prediction:
+        prediction["DepDelay"] = float(prediction["DepDelay"])
 
     for key in ["FlightNum", "Carrier"]:
         if prediction.get(key) is None:

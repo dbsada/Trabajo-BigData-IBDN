@@ -72,6 +72,7 @@ var modelNameMap = {};
 
 // ─── SocketIO events ──────────────────────────────────────────────
 socket.on('saved', function(data) {
+  console.log('[SocketIO] saved event received', data);
   if (archTimer) { clearTimeout(archTimer); archTimer = null; }
   (function step() {
     if (stepIndex >= 6) { showResult(data); return; }

@@ -17,16 +17,19 @@ app.register_blueprint(prediction_bp)
 app.register_blueprint(models_bp)
 app.register_blueprint(logs_bp)
 
-from kafka_handler import set_emit_function, start_consumers
-set_emit_function(lambda data: socketio.server.emit("saved", data))
-start_consumers()
+from kafka_handler import set_emit_function, start_consumers as _start_kafka
+def _emit_saved(data):
+    print(f"[Kafka] Emitting saved for {data.get('UUID','?')[:8]}")
+    socketio.emit("saved", data)
+set_emit_function(_emit_saved)
 
 from routes.models import set_emit_function as set_training_emit
-set_training_emit(lambda data: socketio.server.emit("training_update", data))
+set_training_emit(lambda data: socketio.emit("training_update", data))
 
 @app.route("/")
 def index():
     return render_template("index.html")
 
 if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=FLASK_PORT, debug=True, allow_unsafe_werkzeug=True)
+    _start_kafka()
+    socketio.run(app, host="0.0.0.0", port=FLASK_PORT, debug=True, use_reloader=False, allow_unsafe_werkzeug=True)

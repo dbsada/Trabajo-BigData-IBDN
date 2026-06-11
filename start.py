@@ -100,6 +100,7 @@ def data_pipeline(kexec_prefix, is_docker=True):
             break
         print("    ⏳ Cassandra no lista, reintentando...")
         time.sleep(10)
+    log("Cassandra inicializada con distancias")
 
 
 # ═══════════════════════════════════════════════════════════════
