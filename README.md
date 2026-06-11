@@ -29,8 +29,6 @@ Puedes utilizar el comando `python3 start.py --skip-build` para saltar la fase d
 ## Iniciar la aplicación:
 Navega a `http://localhost:5001` para acceder a la aplicación web de predicción de retrasos de vuelos. Desde allí, podrás interactuar con la aplicación y ver los resultados de las predicciones. A continuación se muestran algunas caputuras de la aplicación que muestran todas sus funcionalidades:
 
-
-
 ## Arquitectura:
 La arqutitectura de la aplicación se compone de varios servicios que interactúan entre sí para proporcionar dos funcionalidades: entrenamiento de modelos y predicción de retrasos de vuelos:
 
