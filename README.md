@@ -16,8 +16,8 @@ cd Trabajo-BigData-IBDN
 cp .env.example .env
 ```
 
-#### 3. Instalar Docker:
-Si no tienes Docker instalado, puedes descargarlo e instalarlo desde [aquí](https://www.docker.com/products/docker-desktop). Asegúrate de que Docker esté funcionando correctamente antes de continuar. Tambien puedes instalarlo usando [homebrew](https://formulae.brew.sh/formula/docker).
+#### 3. Instalar Docker y SBT:
+Es necesario tener Docker y SBT instalados para ejecutar el proyecto. Se pueden instalar desde [aquí](https://www.docker.com/products/docker-desktop)(docker) y [aquí](https://www.scala-sbt.org/download/)(SBT) respectivamente. Nosotros los instalamos usando homebrew ([docker](https://formulae.brew.sh/formula/docker) y [sbt](https://formulae.brew.sh/formula/sbt)).
 
 ### 4. Iniciar el proyecto:
 ```shell
