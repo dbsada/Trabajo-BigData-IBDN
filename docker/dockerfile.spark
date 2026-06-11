@@ -1,5 +1,1 @@
-ARG BASE_IMAGE=spark-base:4.1.1
-FROM ${BASE_IMAGE}
-
-COPY docker/spark-defaults.conf /opt/spark/conf/spark-defaults.conf
-COPY jars/flight_prediction_2.13-0.1.jar /app/flight_prediction/target/scala-2.13/flight_prediction_2.13-0.1.jar
+FROM spark-base:4.1.1

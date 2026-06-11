@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>IBDN · Flight Delay Prediction</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="https://cdn.socket.io/4.5.0/socket.io.min.js"></script>
+  <script src="https://code.jquery.com/jquery-1.12.4.min.js"></script>
+  <script>var DEPLOY_MODE = "{{ DEPLOY_MODE }}";</script>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <img src="/static/icon.svg" style="height:3em;vertical-align:middle;margin-right:0.5em" alt="">
+      <strong>IBDN</strong> · Flight Delay Prediction
+      <span class="badge badge-{{ DEPLOY_MODE }}">{{ DEPLOY_LABEL }}</span>
+    </div>
+    <div class="main-grid">
+      <div>{% block body %}{% endblock %}</div>
+      <div>{% block arch %}{% endblock %}</div>
+    </div>
+    <div class="footer">IBDN Cluster · v2.0</div>
+  </div>
+</body>
+</html>

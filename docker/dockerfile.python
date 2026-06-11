@@ -1,32 +1,10 @@
-FROM python:3.7-slim
+FROM python:3.9-slim
 
-ENV PYTHONUNBUFFERED=1
-ENV PATH="/usr/local/google-cloud-sdk/bin:$PATH"
+RUN pip install flask flask-socketio kafka-python boto3 cassandra-driver iso8601 python-dotenv requests
 
+COPY web/ /app/web/
+COPY scripts/ /app/scripts/
+COPY requirements.txt /app/
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz | \
-    tar xz -C /usr/local/bin --strip-components=1 docker/docker && \
-    chmod +x /usr/local/bin/docker
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3-distutils ca-certificates && \
-    curl -fsSL https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-462.0.0-linux-x86_64.tar.gz | \
-    tar xz -C /usr/local && \
-    /usr/local/google-cloud-sdk/install.sh --quiet --usage-reporting=false --path-update=true && \
-    rm -rf /var/lib/apt/lists/*
-
-COPY docker/requirements.txt /app/requirements.txt
-
-RUN pip install --upgrade pip && pip install -r requirements.txt
-
-COPY . /app
-
-EXPOSE 5001
-
-CMD ["python", "scripts/web/predict_flask.py"]
+CMD ["python3", "web/app.py"]

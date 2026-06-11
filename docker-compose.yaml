@@ -14,7 +14,7 @@ services:
       KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:9093'
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
     volumes:
-      - ./data/kafka:/var/lib/kafka/data
+      - kafka_data:/var/lib/kafka/data
     deploy:
       resources:
         limits:
@@ -23,102 +23,81 @@ services:
   cassandra:
     image: cassandra:4.1
     container_name: cassandra
-    profiles: ["db_cassandra"]
     ports:
       - "9042:9042"
     environment:
       - MAX_HEAP_SIZE=512M
       - HEAP_NEWSIZE=128M
+      - CASSANDRA_HINTED_HANDOFF_ENABLED=false
     volumes:
       - cassandra_data:/var/lib/cassandra
-      - cassandra_hints:/opt/cassandra/data/hints
-    entrypoint:
-      - bash
-      - -c
-      - |
-        mkdir -p /opt/cassandra/data/hints
-        chown cassandra:cassandra /opt/cassandra/data/hints
-        exec /usr/local/bin/docker-entrypoint.sh cassandra -f
-    healthcheck:
-      test: ["CMD", "cqlsh", "-e", "DESCRIBE KEYSPACES"]
-      interval: 15s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
     deploy:
       resources:
         limits:
           memory: 2G
 
   spark-manager:
+    container_name: spark-manager
     build:
       context: .
       dockerfile: docker/dockerfile.spark
-    container_name: spark-manager
     ports:
-      - "${SPARK_MASTER_UI_PORT}:8080"
-      - "${SPARK_MASTER_PORT}:${SPARK_MASTER_PORT}"
+      - "8080:8080"
+      - "7077:7077"
     volumes:
       - .:/app
-      - ./data/coursier:/root/.cache/coursier
-      - ./data/ivy2:/root/.ivy2
     working_dir: /app
     environment:
-      - MLFLOW_TRACKING_URI=${MLFLOW_TRACKING_URI}
+      - MLFLOW_TRACKING_URI=${MLFLOW_URI:-http://mlflow:5000}
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master --host 0.0.0.0
     deploy:
       resources:
         limits:
           memory: 2G
 
   spark-worker:
+    container_name: spark-worker
     build:
       context: .
       dockerfile: docker/dockerfile.spark
-    container_name: spark-worker
     depends_on:
       - spark-manager
     volumes:
       - .:/app
-      - ./data/coursier:/root/.cache/coursier
-      - ./data/ivy2:/root/.ivy2
     working_dir: /app
     environment:
-      - SPARK_MASTER=${SPARK_MASTER_URL}
+      - SPARK_MASTER=spark://spark-manager:7077
       - SPARK_WORKER_MEMORY=6G
-      - SPARK_WORKER_CORES=4
-    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker ${SPARK_MASTER_URL}
+      - SPARK_WORKER_CORES=8
+      - MLFLOW_TRACKING_URI=${MLFLOW_URI:-http://mlflow:5000}
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-manager:7077
     deploy:
       resources:
         limits:
           memory: 7G
 
   flask:
+    container_name: flask
     build:
       context: .
       dockerfile: docker/dockerfile.python
-    container_name: flask
     ports:
-      - "${FLASK_PORT}:${FLASK_PORT}"
+      - "${FLASK_PORT:-5001}:5001"
     depends_on:
       - kafka
     volumes:
       - .:/app
-      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - FLASK_DEBUG=1
-      - PROJECT_HOME=/app/
-      - DB_MODE=cassandra
-      - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS}
-      - KAFKA_LOCAL_BOOTSTRAP_SERVERS=${KAFKA_LOCAL_BOOTSTRAP_SERVERS}
-      - KAFKA_TOPIC=${KAFKA_TOPIC}
-      - KAFKA_RESPONSE_TOPIC=${KAFKA_RESPONSE_TOPIC}
-      - KAFKA_STATUS_TOPIC=${KAFKA_STATUS_TOPIC}
-      - MLFLOW_TRACKING_URI=${MLFLOW_TRACKING_URI}
-      - SKIP_AUTO_START_PREDICTION=${SKIP_AUTO_START_PREDICTION:-0}
+      - PROJECT_HOME=${PROJECT_HOME:-/app}
+      - KAFKA=${KAFKA:-kafka:9092}
+      - TOPIC_IN=${TOPIC_IN:-request}
+      - TOPIC_OUT=${TOPIC_OUT:-response}
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-http://minio:9000}
+      - MINIO_USER=${MINIO_USER:-admin}
+      - MINIO_PASSWORD=${MINIO_PASSWORD:-password}
+      - MLFLOW_URI=${MLFLOW_URI:-http://mlflow:5000}
       - DEPLOY_MODE=${DEPLOY_MODE:-local}
-      - MINIO_ENDPOINT=http://minio:9000
-      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-admin}
-      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-password}
     deploy:
       resources:
         limits:
@@ -126,17 +105,15 @@ services:
 
   mlflow:
     image: python:3.9-slim
-    container_name: mlflow
     ports:
-      - "${MLFLOW_PORT}:5000"
+      - "${MLFLOW_PORT:-5003}:5000"
     volumes:
-      - ./data/mlflow:/data/mlflow
+      - mlflow_data:/data/mlflow
     environment:
-      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
-      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
-      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
-    command: >
-      sh -c "pip install -q mlflow boto3 && mlflow server --host 0.0.0.0 --backend-store-uri sqlite:///data/mlflow/mlflow.db --default-artifact-root s3a://lakehouse/mlflow/"
+      MLFLOW_S3_ENDPOINT_URL: ${MINIO_ENDPOINT:-http://minio:9000}
+      AWS_ACCESS_KEY_ID: ${MINIO_USER:-admin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_PASSWORD:-password}
+    command: sh -c "pip install -q mlflow boto3 && mlflow server --host 0.0.0.0 --backend-store-uri sqlite:///data/mlflow/mlflow.db --default-artifact-root s3a://lakehouse/mlflow/"
     depends_on:
       - minio
     restart: on-failure
@@ -149,11 +126,11 @@ services:
     image: minio/minio
     container_name: minio
     ports:
-      - "${MINIO_API_PORT}:${MINIO_API_PORT}"
-      - "${MINIO_CONSOLE_PORT}:${MINIO_CONSOLE_PORT}"
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_ROOT_USER: ${MINIO_USER:-admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD:-password}
     volumes:
       - minio_data:/data
     command: server /data --console-address ":9001"
@@ -164,66 +141,65 @@ services:
 
   postgres:
     image: postgres:13
-    container_name: airflow-postgres
     ports:
-      - "5432:5432"
+      - "${AIRFLOW_POSTGRES_PORT:-5432}:5432"
     environment:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: airflow
       POSTGRES_DB: airflow
     volumes:
-      - airflow_postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
     deploy:
       resources:
         limits:
-          memory: 128M
+          memory: 256M
 
   airflow-init:
     build:
       context: .
       dockerfile: docker/dockerfile.airflow
-    container_name: airflow-init
     depends_on:
       - postgres
     environment:
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__EXECUTION_API__JWT_AUDIENCE: urn:airflow.apache.org:task
+      AIRFLOW__API_AUTH__JWT_SECRET: "7768751063fa88c0b8efcad2d4d8c68d"
+      AIRFLOW__API__SECRET_KEY: "7768751063fa88c0b8efcad2d4d8c68d"
+      AIRFLOW__SDK__API_URL: http://airflow-webserver:8080/
+      AIRFLOW__API__BASE_URL: http://airflow-webserver:8080
     volumes:
       - .:/app
-      - /var/run/docker.sock:/var/run/docker.sock
       - ./dags:/opt/airflow/dags
     command: >
-      bash -c "airflow db migrate && python /app/docker/airflow_init_user.py"
+      bash -c "
+        airflow db migrate &&
+        airflow users create --username admin --firstname Admin --lastname User
+          --role Admin --email admin@example.com --password admin 2>/dev/null || true
+      "
 
   airflow-webserver:
     build:
       context: .
       dockerfile: docker/dockerfile.airflow
-    container_name: airflow-webserver
     depends_on:
       - postgres
     restart: on-failure
     ports:
-      - "8085:8080"
+      - "${AIRFLOW_UI_PORT:-8085}:8080"
     environment:
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "True"
       AIRFLOW_CONN_SPARK_MASTER: http://spark-manager:8080
-      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI}
-      _AIRFLOW_WWW_USER_USERNAME: admin
-      _AIRFLOW_WWW_USER_PASSWORD: admin
-      _AIRFLOW_WWW_USER_FIRSTNAME: Admin
-      _AIRFLOW_WWW_USER_LASTNAME: User
-      _AIRFLOW_WWW_USER_EMAIL: admin@example.com
-      _AIRFLOW_WWW_USER_ROLE: Admin
+      MLFLOW_TRACKING_URI: ${MLFLOW_URI:-http://mlflow:5000}
       AIRFLOW__EXECUTION_API__JWT_AUDIENCE: urn:airflow.apache.org:task
       AIRFLOW__API_AUTH__JWT_SECRET: "7768751063fa88c0b8efcad2d4d8c68d"
       AIRFLOW__API__SECRET_KEY: "7768751063fa88c0b8efcad2d4d8c68d"
-      AIRFLOW__API__BASE_URL: http://airflow-webserver:8080
-      AIRFLOW__SDK__API_URL: http://airflow-webserver:8080/
+      AIRFLOW__API__ACCESS_CONTROL_ALLOW_HEADERS: "*"
+      AIRFLOW__API__ACCESS_CONTROL_ALLOW_ORIGIN: "*"
     volumes:
       - .:/app
-      - /var/run/docker.sock:/var/run/docker.sock
       - ./dags:/opt/airflow/dags
     command: api-server -p 8080 --apps all
     deploy:
@@ -235,14 +211,13 @@ services:
     build:
       context: .
       dockerfile: docker/dockerfile.airflow
-    container_name: airflow-scheduler
     depends_on:
       - postgres
     restart: on-failure
     environment:
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI}
+      MLFLOW_TRACKING_URI: http://mlflow:5000
       AIRFLOW__EXECUTION_API__JWT_AUDIENCE: urn:airflow.apache.org:task
       AIRFLOW__API_AUTH__JWT_SECRET: "7768751063fa88c0b8efcad2d4d8c68d"
       AIRFLOW__API__SECRET_KEY: "7768751063fa88c0b8efcad2d4d8c68d"
@@ -256,13 +231,12 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: 256M
 
   airflow-dag-processor:
     build:
       context: .
       dockerfile: docker/dockerfile.airflow
-    container_name: airflow-dag-processor
     depends_on:
       - postgres
     restart: on-failure
@@ -278,9 +252,14 @@ services:
       - .:/app
       - ./dags:/opt/airflow/dags
     command: dag-processor
+    deploy:
+      resources:
+        limits:
+          memory: 256M
 
 volumes:
-  minio_data:
+  kafka_data:
   cassandra_data:
-  cassandra_hints:
-  airflow_postgres_data:
+  minio_data:
+  mlflow_data:
+  postgres_data:

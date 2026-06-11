@@ -1,0 +1,793 @@
+{% extends "layout.html" %}
+{% block body %}
+
+<form id="predict-form" action="/api/predict" method="post">
+  <div class="form-grid">
+    <div>
+      <label for="origin">Origin</label>
+      <input name="Origin" id="origin" class="ac-airport" type="text" value="ATL" autocomplete="off">
+    </div>
+    <div>
+      <label for="dest">Destination</label>
+      <input name="Dest" id="dest" class="ac-airport" type="text" value="SFO" autocomplete="off">
+    </div>
+    <div>
+      <label for="carrier">Carrier</label>
+      <select name="Carrier" id="carrier">
+        <option value="AA">AA - American Airlines</option>
+        <option value="DL">DL - Delta</option>
+        <option value="UA">UA - United</option>
+        <option value="B6">B6 - JetBlue</option>
+        <option value="AS">AS - Alaska</option>
+      </select>
+    </div>
+    <div>
+      <label for="depdelay">Departure Delay</label>
+      <input name="DepDelay" id="depdelay" type="number" value="5" min="-999" max="999">
+    </div>
+    <div>
+      <label for="flightdate">Date</label>
+      <input name="FlightDate" id="flightdate" type="date" value="2016-12-25">
+    </div>
+    <div class="full" style="text-align:right;margin-top:0.5rem">
+      <input type="hidden" id="model-ids-input" value="">
+      <button type="submit" id="predict-btn">Predict</button>
+    </div>
+  </div>
+</form>
+
+<div class="result-box">
+  <svg id="route-svg" viewBox="0 0 240 32" width="100%" style="overflow:visible;margin-bottom:0.75rem">
+    <defs>
+      <marker id="route-arrow" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="5" markerHeight="5" orient="auto">
+        <path d="M0 0 L8 4 L0 8z" fill="#60a5fa"/>
+      </marker>
+    </defs>
+    <text id="route-origin" x="16" y="20" fill="#e0e0e8" font-size="11" font-weight="700" text-anchor="middle">ATL</text>
+    <text id="route-dest" x="224" y="20" fill="#e0e0e8" font-size="11" font-weight="700" text-anchor="middle">SFO</text>
+    <path id="route-path" d="M 30 16 Q 120 -2 200 16" fill="none" stroke="#3a3a4e" stroke-width="2"/>
+    <g id="route-plane" opacity="0">
+      <path d="M0,-3 L5,0 L0,3 L1.5,0Z" fill="#60a5fa"/>
+      <animateMotion dur="1.5s" repeatCount="1" fill="freeze" begin="indefinite">
+        <mpath href="#route-path"/>
+      </animateMotion>
+    </g>
+  </svg>
+  <div class="result-label">Predictions</div>
+  <div id="result-list" class="result-value"></div>
+</div>
+
+<script>
+var socket = io();
+var AIRPORTS = null;
+var activeModelIds = [];
+var _isTraining = false;
+var archArrows = ['#sv-a0','#sv-a1','#sv-a2','#sv-a3','#sv-a4'];
+var archNodes = ['sv-flask','sv-kafka-l','sv-spark','sv-kafka-r','sv-bbdd','sv-flask'];
+var stepIndex = 0;
+var archTimer = null;
+var trainingPollTimer = null;
+var _pendingTrainingRow = false;
+var modelNameMap = {};
+
+// ─── SocketIO events ──────────────────────────────────────────────
+socket.on('saved', function(data) {
+  if (archTimer) { clearTimeout(archTimer); archTimer = null; }
+  (function step() {
+    if (stepIndex >= 6) { showResult(data); return; }
+    advanceArch();
+    setTimeout(step, 200);
+  })();
+});
+socket.on('training_update', function(data) {
+  if (data.status === 'started') {
+    _isTraining = true;
+    _pendingTrainingRow = true;
+    loadModels();
+  } else if (data.status === 'running') {
+    var row = document.querySelector('.training-row');
+    if (row && data.elapsed > 0) {
+      var ts = row.querySelector('.train-elapsed');
+      if (ts) ts.innerHTML = formatDuration(data.elapsed);
+    }
+  } else if (data.status === 'completed') {
+    var row = document.querySelector('.training-row');
+    if (row) {
+      row.querySelector('.train-elapsed').textContent = 'done';
+      setTimeout(function() { row.remove(); loadModels(); }, 1500);
+    }
+    _isTraining = false;
+    checkActiveModel();
+  } else if (data.status === 'cancelled') {
+    var row = document.querySelector('.training-row');
+    if (row) row.remove();
+    _isTraining = false;
+    loadModels();
+    checkActiveModel();
+  } else if (data.status === 'failed') {
+    var row = document.querySelector('.training-row');
+    if (row) {
+      row.innerHTML = '<span style="color:#e05a5a;font-size:0.75rem">Training failed: ' + (data.error || 'unknown') + '</span>';
+    }
+    _isTraining = false;
+    checkActiveModel();
+  }
+});
+
+// ─── Airport autocomplete ─────────────────────────────────────────
+$(document).on('focus', '.ac-airport', function() {
+  if (!AIRPORTS) { fetch('/api/airports').then(r => r.json()).then(d => { AIRPORTS = d; }); }
+  showDropdown(this);
+}).on('input', '.ac-airport', function() {
+  showDropdown(this);
+  updateRouteLabels();
+}).on('blur', '.ac-airport', function() {
+  setTimeout(function() { hideDropdown(this); }.bind(this), 200);
+}).on('change', '.ac-airport', function() {
+  updateRouteLabels();
+});
+
+function updateRouteLabels() {
+  var o = document.querySelector('input[name="Origin"]');
+  var d = document.querySelector('input[name="Dest"]');
+  if (document.getElementById('route-origin') && o) document.getElementById('route-origin').textContent = o.value || '---';
+  if (document.getElementById('route-dest') && d) document.getElementById('route-dest').textContent = d.value || '---';
+}
+
+function showDropdown(input) {
+  var dd = getDropdown(input);
+  if (!AIRPORTS) { dd.style.display = 'none'; return; }
+  var val = input.value.toUpperCase();
+  var matches = val ? AIRPORTS.filter(function(a) { return a.indexOf(val) === 0; }) : AIRPORTS;
+  matches = matches.slice(0, 50);
+  if (matches.length === 0 || (matches.length === 1 && matches[0] === val)) { dd.style.display = 'none'; return; }
+  dd.innerHTML = matches.map(function(m) { return '<div class="ac-item' + (m === val ? ' ac-sel' : '') + '" data-val="' + m + '">' + m + '</div>'; }).join('');
+  dd.style.display = 'block';
+}
+
+function getDropdown(input) {
+  var dd = input._dd;
+  if (!dd) {
+    dd = document.createElement('div');
+    dd.className = 'ac-dropdown';
+    input.parentNode.appendChild(dd);
+    dd.addEventListener('mousedown', function(e) {
+      var item = e.target.closest('.ac-item');
+      if (item) { input.value = item.dataset.val; hideDropdown(input); $(input).trigger('change'); updateRouteLabels(); }
+    });
+    input._dd = dd;
+  }
+  dd.style.cssText = 'left:0;top:' + (input.offsetHeight + 2) + 'px;width:' + input.offsetWidth + 'px';
+  return dd;
+}
+
+function hideDropdown(input) {
+  if (input._dd) input._dd.style.display = 'none';
+}
+
+// ─── Architecture SVG animation ──────────────────────────────────
+function resetArch() {
+  if (archTimer) { clearTimeout(archTimer); archTimer = null; }
+  stepIndex = 0;
+  archArrows.forEach(function(s) { var e = document.querySelector(s); if (e) { e.classList.remove('s-active','s-done'); } });
+  archNodes.forEach(function(s) { var e = document.getElementById(s); if (e) e.classList.remove('s-active','s-done'); });
+  stopRouteAnimation();
+}
+
+function advanceArch() {
+  var arrowsOn = [[0],[1],[2],[3],[4],[]];
+  if (stepIndex > 0) {
+    (arrowsOn[stepIndex - 1] || []).forEach(function(idx) {
+      var prev = document.querySelector(archArrows[idx]);
+      if (prev) { prev.classList.remove('s-active'); prev.classList.add('s-done'); }
+    });
+    if (stepIndex - 1 < archNodes.length) {
+      var pn = document.getElementById(archNodes[stepIndex - 1]);
+      if (pn) { pn.classList.remove('s-active'); pn.classList.add('s-done'); }
+    }
+  }
+  (arrowsOn[stepIndex] || []).forEach(function(idx) {
+    var el = document.querySelector(archArrows[idx]);
+    if (el) el.classList.add('s-active');
+  });
+  if (stepIndex < archNodes.length) {
+    var n = document.getElementById(archNodes[stepIndex]);
+    if (n) { n.classList.remove('s-done'); n.classList.add('s-active'); }
+  }
+  stepIndex++;
+  if (stepIndex < 6) {
+    var delays = [250, 600, 600, 300, 400];
+    archTimer = setTimeout(advanceArch, delays[stepIndex - 1]);
+  } else {
+    archTimer = setTimeout(function() {
+      var f = document.getElementById('sv-flask');
+      if (f) f.classList.remove('s-active');
+    }, 1200);
+  }
+}
+
+// ─── Prediction flow ──────────────────────────────────────────────
+$("#predict-form").submit(function(e) {
+  e.preventDefault();
+  if ($("#predict-btn").prop('disabled')) return;
+  var anyActive = activeModelIds.length > 0 || ($('#model-ids-input').val() || '').trim();
+  if (!anyActive) { alert('No active model. Train or activate one in Models tab.'); return; }
+  doPredict();
+});
+
+function doPredict() {
+  resetArch();
+  startRouteAnimation();
+  $("#predict-btn").prop('disabled', true).text('Sending...');
+  var data = $("#predict-form").serialize() + '&model_ids[]=' + activeModelIds.join('&model_ids[]=');
+  $.post('/api/predict', data).done(function(resp) {
+    if (resp.status === "OK") {
+      advanceArch();
+      var rl = document.getElementById('result-list');
+      rl.innerHTML = activeModelIds.map(function(id) {
+        var name = modelNameMap[id] || id.slice(0,8);
+        return '<div style="color:#555;font-size:0.7rem;padding:0.2rem 0">⏳ Processing <span style="color:#888;font-size:0.65rem">(' + name + ')</span></div>';
+      }).join('');
+      setTimeout(function() { advanceArch(); }, 250);
+    }
+  });
+}
+
+function showResult(data) {
+  $("#predict-btn").prop('disabled', false).text('Predict');
+  var rl = document.getElementById('result-list');
+  if (!rl) return;
+  var delayClass = data.Prediction === 0 ? 'ON_TIME' : 'DELAYED';
+  var color = data.Prediction === 0 ? '#22c55e' : '#e05a5a';
+  var mName = data.model_id ? (modelNameMap[data.model_id] || data.model_id.slice(0,8)) : '';
+  var html = '<div style="color:' + color + ';font-weight:700;font-size:1rem;margin-bottom:0.2rem">'
+    + delayClass
+    + (mName ? ' <span style="color:#888;font-weight:400;font-size:0.75rem">(model: ' + mName + ')</span>' : '')
+    + '</div>';
+  var items = rl.querySelectorAll('div');
+  for (var i = 0; i < items.length; i++) {
+    if (items[i].textContent.indexOf(data.model_id) >= 0 || items[i].textContent.indexOf('Processing') >= 0) {
+      items[i].outerHTML = html;
+      return;
+    }
+  }
+  rl.innerHTML += html;
+}
+
+function startRouteAnimation() {
+  var g = document.getElementById('route-plane');
+  if (g) { g.setAttribute('opacity', '1'); g.querySelector('animateMotion').beginElement(); }
+}
+
+function stopRouteAnimation() {
+  var g = document.getElementById('route-plane');
+  if (g) g.setAttribute('opacity', '0');
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────
+function fmtDate(ts) {
+  if (!ts || ts == 0) return '—';
+  var d = new Date(ts);
+  if (isNaN(d.getTime())) return '—';
+  return (d.getDate() + '/' + (d.getMonth()+1));
+}
+function fmtPct(v) { return v !== undefined && v !== null ? (v * 100).toFixed(1) + '%' : '—'; }
+function fmtDur(s) { return s ? parseInt(s) + 's' : '—'; }
+function formatDuration(s) {
+  var m = Math.floor(s / 60);
+  var sec = s % 60;
+  return m + 'm ' + (sec < 10 ? '0' : '') + sec + 's';
+}
+
+// ─── Models panel ─────────────────────────────────────────────────
+var modelsLoaded = false;
+
+function loadModels() {
+  fetch('/api/models').then(function(r) { return r.json(); }).then(function(data) {
+    var loadingEl = document.getElementById('models-loading');
+    if (loadingEl) loadingEl.style.display = 'none';
+    var c = document.getElementById('models-content');
+    if (!c) return;
+    c.style.display = 'block';
+    activeModelIds = data.active_model_ids || [];
+    modelNameMap = {};
+    data.models.forEach(function(m) { modelNameMap[m.run_id] = m.run_name; });
+
+    var html = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.4rem">';
+    html += '<div style="font-size:0.75rem;color:#888"></div>';
+    html += '<div style="display:flex;align-items:center;gap:0.3rem;font-size:0.6rem;color:#555">';
+    html += '<span id="acc-legend">';
+    html += '<span style="color:#22c55e">●</span>≥85%';
+    html += '<span style="color:#84cc16">●</span>≥70%';
+    html += '<span style="color:#eab308">●</span>≥50%';
+    html += '<span style="color:#ef4444">●</span>&lt;50%';
+    html += '</span>';
+    html += '<button id="delete-selected-btn" style="display:none;background:none;color:#e05a5a;border:none;padding:0;font-size:0.7rem;cursor:pointer;font-family:inherit;font-weight:500">Delete selected</button>';
+    html += '</div></div>';
+
+    if (data.models.length === 0) {
+      html += '<table style="width:100%;table-layout:fixed;border-collapse:collapse;font-size:0.8rem"><thead><tr style="border-bottom:1px solid #2a2a3a">';
+      html += '<th style="padding:0.35rem 0.2rem;width:28px"></th>';
+      html += '<th style="padding:0.35rem 0.5rem;text-align:left;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Name</th>';
+      html += '<th style="padding:0.35rem 0.5rem;text-align:right;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase;width:55px">Acc</th>';
+      html += '<th style="padding:0.35rem 0.3rem;text-align:center;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase;width:40px">Vrf</th>';
+      html += '<th style="padding:0.35rem 0.5rem;text-align:right;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase;width:50px">Time</th>';
+      html += '<th style="padding:0.35rem 0.5rem;text-align:right;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase;width:55px">Date</th>';
+      html += '</tr></thead><tbody></tbody></table>';
+      html += '<div style="padding:1rem;text-align:center;color:#555;font-size:0.8rem">No trained models yet. Train one first.</div>';
+    } else {
+      html += '<table style="width:100%;table-layout:fixed;border-collapse:collapse;font-size:0.8rem">';
+      html += '<thead><tr style="border-bottom:1px solid #2a2a3a">';
+      html += '<th style="padding:0.35rem 0.2rem;width:28px;text-align:center"><input type="checkbox" class="model-check" id="select-all-checks"></th>';
+      html += '<th style="padding:0.35rem 0.5rem;text-align:left;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase">Name</th>';
+      html += '<th style="padding:0.35rem 0.5rem;text-align:right;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase;width:55px">Acc</th>';
+      html += '<th style="padding:0.35rem 0.3rem;text-align:center;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase;width:40px">Vrf</th>';
+      html += '<th style="padding:0.35rem 0.5rem;text-align:right;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase;width:50px">Time</th>';
+      html += '<th style="padding:0.35rem 0.5rem;text-align:right;color:#888;font-weight:500;font-size:0.65rem;text-transform:uppercase;width:55px">Date</th>';
+      html += '</tr></thead><tbody>';
+
+      data.models.forEach(function(m) {
+        var date = fmtDate(m.start_time);
+        var acc = m.status === 'RUNNING' ? '…' : fmtPct(m.metrics ? m.metrics.accuracy : undefined);
+        var dur = m.params ? fmtDur(m.params.training_duration_seconds) : '—';
+        var isActive = activeModelIds.indexOf(m.run_id) >= 0;
+        var stageBadge = '';
+        if (m.stage === 'Production') stageBadge = ' <span style="background:#22c55e20;color:#22c55e;padding:0.1rem 0.35rem;border-radius:3px;font-size:0.65rem;font-weight:600">Production</span>';
+        else if (m.stage === 'Staging') stageBadge = ' <span style="background:#60a5fa20;color:#60a5fa;padding:0.1rem 0.35rem;border-radius:3px;font-size:0.65rem;font-weight:600">Staging</span>';
+        var verifiedBadge = m.verified ? ' <span style="color:#22c55e;font-weight:600;font-size:0.85rem">✓</span>' : ' <span style="color:#555;font-size:0.75rem">—</span>';
+        html += '<tr class="model-row" data-run="' + m.run_id + '" data-active="' + isActive + '" style="border-bottom:1px solid #1e1e28">';
+        html += '<td style="padding:0.35rem 0.2rem;text-align:center"><input type="checkbox" class="model-check" data-run="' + m.run_id + '"></td>';
+        html += '<td style="padding:0.35rem 0.5rem;text-align:left;color:#d0d0d8;cursor:pointer" class="model-name">' + (m.run_name || m.run_id.slice(0,8)) + (m.version ? ' <span style="color:#555;font-size:0.65rem">v' + m.version + '</span>' : '') + (isActive ? ' <span style="color:#22c55e;font-size:0.7rem;font-weight:600">✓</span>' : '') + ' ' + stageBadge + '</td>';
+        var accColor = '#555';
+        if (acc !== '—' && acc !== '…') {
+          var pct = parseFloat(acc);
+          if (pct >= 85) accColor = '#22c55e';
+          else if (pct >= 70) accColor = '#84cc16';
+          else if (pct >= 50) accColor = '#eab308';
+          else accColor = '#ef4444';
+        }
+        html += '<td style="padding:0.35rem 0.5rem;text-align:right;color:' + accColor + ';font-weight:600;font-size:0.75rem">' + acc + '</td>';
+        html += '<td style="padding:0.35rem 0.3rem;text-align:center;color:#555;font-size:0.75rem">' + verifiedBadge + '</td>';
+        html += '<td style="padding:0.35rem 0.5rem;text-align:right;color:#555">' + dur + '</td>';
+        html += '<td style="padding:0.35rem 0.5rem;text-align:right;color:#555;cursor:pointer" class="model-name">' + date + '</td>';
+        html += '</tr>';
+      });
+      html += '</tbody></table>';
+    }
+
+    html += '<div style="margin-top:0.6rem;display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">';
+    html += '<button id="train-btn" style="background:#2563eb;color:#fff;border:none;padding:0.35rem 0.8rem;border-radius:4px;font-size:0.7rem;cursor:pointer;font-weight:500;white-space:nowrap">Train via Flask</button>';
+    html += '<a href="http://localhost:8085" target="_blank" style="background:#22c55e;color:#fff;padding:0.35rem 0.8rem;border-radius:4px;font-size:0.7rem;text-decoration:none;font-weight:500;white-space:nowrap;display:inline-flex;align-items:center">Airflow</a>';
+    html += '<a href="http://localhost:5003" target="_blank" style="background:#60a5fa;color:#fff;padding:0.35rem 0.8rem;border-radius:4px;font-size:0.7rem;text-decoration:none;font-weight:500;white-space:nowrap;display:inline-flex;align-items:center">MLflow</a>';
+    html += '</div>';
+    c.innerHTML = html;
+
+    $('#model-ids-input').val(activeModelIds.join(','));
+
+    // Training status check
+    fetch('/api/models/train/status').then(function(r) { return r.json(); }).then(function(s) {
+      var btn = document.getElementById('train-btn');
+      if (!btn) return;
+      if (s.status === 'running') {
+        _isTraining = true;
+        btn.disabled = true; btn.style.opacity = '0.5'; btn.style.cursor = 'not-allowed'; btn.textContent = 'Training\u2026';
+        showTrainingRow(s.elapsed || 0);
+        checkActiveModel();
+      } else if (_pendingTrainingRow) {
+        _isTraining = true;
+        btn.disabled = true; btn.style.opacity = '0.5'; btn.style.cursor = 'not-allowed'; btn.textContent = 'Training\u2026';
+        showTrainingRow(0);
+        checkActiveModel();
+      } else {
+        _isTraining = false;
+        btn.disabled = false; btn.style.opacity = '1'; btn.style.cursor = 'pointer'; btn.textContent = 'Train via Flask';
+        checkActiveModel();
+      }
+    });
+
+    // Row click → toggle activate/deactivate
+    c.querySelectorAll('.model-name').forEach(function(cell) {
+      cell.addEventListener('click', function(e) {
+        if (e.target.type === 'checkbox') return;
+        var row = this.closest('.model-row');
+        var runId = row.dataset.run;
+        var isActive = row.dataset.active === 'true';
+        if (isActive) {
+          $.post('/api/models/deactivate/' + runId).done(function() { modelsLoaded = false; loadModels(); });
+        } else {
+          _activateModel(runId);
+        }
+      });
+    });
+
+    // Context menu
+    c.querySelectorAll('.model-row').forEach(function(row) {
+      row.addEventListener('contextmenu', function(e) {
+        e.preventDefault();
+        var runId = this.dataset.run;
+        var isActive = this.dataset.active === 'true';
+        var model = data.models.find(function(m) { return m.run_id === runId; });
+        _showContextMenu(e.clientX, e.clientY, runId, isActive, model);
+      });
+    });
+
+    // Checkboxes
+    c.querySelectorAll('.model-check').forEach(function(cb) {
+      cb.addEventListener('change', function() {
+        var row = this.closest('.model-row');
+        if (row) row.style.background = this.checked ? 'rgba(37,99,235,0.1)' : '';
+        updateDeleteBtn();
+      });
+    });
+
+    // Select all
+    var selectAll = document.getElementById('select-all-checks');
+    if (selectAll) {
+      selectAll.addEventListener('change', function() {
+        var modelCbs = c.querySelectorAll('.model-check:not(#select-all-checks)');
+        var anyUnchecked = Array.from(modelCbs).some(function(cb) { return !cb.checked; });
+        modelCbs.forEach(function(cb) {
+          cb.checked = anyUnchecked;
+          var row = cb.closest('.model-row');
+          if (row) row.style.background = anyUnchecked ? 'rgba(37,99,235,0.1)' : '';
+        });
+        updateDeleteBtn();
+      });
+    }
+
+    // Delete selected
+    var delBtn = document.getElementById('delete-selected-btn');
+    if (delBtn) {
+      delBtn.addEventListener('click', function() {
+        var checked = document.querySelectorAll('.model-check:checked');
+        var ids = Array.from(checked).map(function(cb) { return cb.dataset.run; }).filter(function(id) { return id; });
+        if (ids.length === 0) return;
+        if (!confirm('Delete ' + ids.length + ' model(s)?')) return;
+        var done = 0;
+        ids.forEach(function(id) {
+          fetch('/api/models/delete/' + id, { method: 'POST' }).then(function(r) { return r.json(); }).then(function(d) {
+            if (d.error) { alert('Error: ' + d.error); return; }
+            done++;
+            if (done === ids.length) { modelsLoaded = false; loadModels(); checkActiveModel(); }
+          });
+        });
+      });
+    }
+
+    // Train button
+    document.getElementById('train-btn').addEventListener('click', function() {
+      document.getElementById('train-modal').style.display = 'flex';
+    });
+
+    checkActiveModel();
+  }).catch(function() {
+    var loadingEl = document.getElementById('models-loading');
+    if (loadingEl) loadingEl.style.display = 'none';
+    var c = document.getElementById('models-content');
+    if (c) c.innerHTML = '<div style="padding:1rem;text-align:center;color:#e05a5a;font-size:0.8rem">Failed to load models</div>';
+  });
+}
+
+function checkActiveModel() {
+  var btn = document.getElementById('predict-btn');
+  if (!btn) return;
+  btn.disabled = activeModelIds.length === 0 || _isTraining;
+  if (_isTraining) btn.textContent = 'Training\u2026';
+  else if (activeModelIds.length > 0) btn.textContent = 'Predict';
+  else btn.textContent = 'Predict';
+  btn.title = _isTraining ? 'Training in progress' : (activeModelIds.length > 0 ? '' : 'No active model');
+}
+
+function _activateModel(runId) {
+  if (_isTraining) return;
+  var btn = document.getElementById('predict-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Activating\u2026'; }
+  fetch('/api/models/activate/' + runId, { method: 'POST' }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.error) { alert('Error: ' + d.error); return; }
+    modelsLoaded = false;
+    loadModels();
+  });
+}
+
+function _showContextMenu(x, y, runId, isActive, model) {
+  var existing = document.getElementById('ctx-menu');
+  if (existing) existing.remove();
+  var menu = document.createElement('div');
+  menu.id = 'ctx-menu';
+  menu.style.cssText = 'position:fixed;top:' + y + 'px;left:' + x + 'px;background:#1e1e2a;border:1px solid #2a2a3a;border-radius:6px;padding:0.25rem 0;z-index:2000;min-width:120px;box-shadow:0 8px 24px rgba(0,0,0,0.4)';
+  if (!isActive) {
+    var actItem = document.createElement('div');
+    actItem.textContent = 'Activate';
+    actItem.style.cssText = 'padding:0.4rem 0.8rem;font-size:0.75rem;color:#d0d0d8;cursor:pointer';
+    actItem.addEventListener('mouseenter', function() { this.style.background = '#2a2a3a'; });
+    actItem.addEventListener('mouseleave', function() { this.style.background = ''; });
+    actItem.addEventListener('click', function() { menu.remove(); _activateModel(runId); });
+    menu.appendChild(actItem);
+  }
+  var infoItem = document.createElement('div');
+  infoItem.textContent = 'Details';
+  infoItem.style.cssText = 'padding:0.4rem 0.8rem;font-size:0.75rem;color:#d0d0d8;cursor:pointer';
+  infoItem.addEventListener('mouseenter', function() { this.style.background = '#2a2a3a'; });
+  infoItem.addEventListener('mouseleave', function() { this.style.background = ''; });
+  infoItem.addEventListener('click', function() { menu.remove(); if (model) showModelDetail(model); });
+  menu.appendChild(infoItem);
+  var delItem = document.createElement('div');
+  delItem.textContent = 'Delete';
+  delItem.style.cssText = 'padding:0.4rem 0.8rem;font-size:0.75rem;color:#e05a5a;cursor:pointer;border-top:1px solid #2a2a3a;margin-top:0.15rem';
+  delItem.addEventListener('mouseenter', function() { this.style.background = '#2a2a3a'; });
+  delItem.addEventListener('mouseleave', function() { this.style.background = ''; });
+  delItem.addEventListener('click', function() {
+    menu.remove();
+    if (!confirm('Delete model ' + runId.slice(0,12) + '?')) return;
+    fetch('/api/models/delete/' + runId, { method: 'POST' }).then(function(r) { return r.json(); }).then(function(d) {
+      if (d.error) { alert('Error: ' + d.error); return; }
+      modelsLoaded = false; loadModels(); checkActiveModel();
+    });
+  });
+  menu.appendChild(delItem);
+  document.body.appendChild(menu);
+  function closeMenu(e) { if (!menu.contains(e.target)) { menu.remove(); document.removeEventListener('click', closeMenu); } }
+  setTimeout(function() { document.addEventListener('click', closeMenu); }, 10);
+}
+
+function showModelDetail(model) {
+  var overlay = document.getElementById('detail-modal');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'detail-modal';
+    overlay.style.cssText = 'display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:#00000080;z-index:1000;justify-content:center;align-items:center';
+    overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.style.display = 'none'; });
+    document.body.appendChild(overlay);
+  }
+  var params = model.params || {};
+  var metrics = model.metrics || {};
+  var acc = model.status === 'RUNNING' ? '—' : metrics.accuracy !== undefined ? (metrics.accuracy * 100).toFixed(1) + '%' : '—';
+  var html = '<div style="background:#1e1e2a;border:1px solid #2a2a3a;border-radius:10px;padding:1.2rem;width:340px;max-height:90vh;overflow-y:auto">';
+  html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.8rem">';
+  html += '<span style="color:#d0d0d8;font-size:0.9rem;font-weight:600">' + (model.run_name || model.run_id.slice(0,8)) + '</span>';
+  html += '<span id="detail-close" style="color:#888;cursor:pointer;font-size:1.1rem">&times;</span>';
+  html += '</div>';
+  html += '<div style="font-size:0.8rem;color:#b0b0b8;line-height:1.6">';
+  html += '<div><span style="color:#555">Run ID:</span> ' + model.run_id.slice(0,12) + '</div>';
+  html += '<div><span style="color:#555">Status:</span> ' + model.status + '</div>';
+  if (model.stage && model.stage !== 'None') {
+    var sc = model.stage === 'Production' ? '#22c55e' : model.stage === 'Staging' ? '#60a5fa' : '#555';
+    html += '<div><span style="color:#555">Stage:</span> <span style="color:' + sc + ';font-weight:600">' + model.stage + (model.version ? ' v' + model.version : '') + '</span></div>';
+  }
+  html += '<div><span style="color:#555">Date:</span> ' + fmtDate(model.start_time) + '</div>';
+  html += '<div style="margin-bottom:0.6rem"><span style="color:#555">Accuracy:</span> <span style="color:#60a5fa;font-weight:600">' + acc + '</span></div>';
+  html += '<div style="font-size:0.65rem;color:#555;text-transform:uppercase;letter-spacing:0.3px;margin-bottom:0.3rem">Parameters</div>';
+  html += '<div style="background:#16161e;border-radius:6px;padding:0.5rem 0.7rem;margin-bottom:0.2rem;font-size:0.8rem">';
+  var pkeys = Object.keys(params);
+  if (pkeys.length === 0) {
+    html += '<span style="color:#555">No parameters logged</span>';
+  } else {
+    pkeys.forEach(function(k) { html += '<div><span style="color:#555">' + k + ':</span> ' + params[k] + '</div>'; });
+  }
+  html += '</div></div></div></div>';
+  overlay.innerHTML = html;
+  overlay.style.display = 'flex';
+  document.getElementById('detail-close').addEventListener('click', function() { overlay.style.display = 'none'; });
+}
+
+function updateDeleteBtn() {
+  var modelCbs = document.querySelectorAll('.model-check:not(#select-all-checks)');
+  var checkedCount = Array.from(modelCbs).filter(function(c) { return c.checked; }).length;
+  var allCb = document.getElementById('select-all-checks');
+  if (allCb) {
+    allCb.checked = modelCbs.length > 0 && checkedCount === modelCbs.length;
+    allCb.indeterminate = checkedCount > 0 && checkedCount < modelCbs.length;
+  }
+  var btn = document.getElementById('delete-selected-btn');
+  if (!btn) return;
+  var legend = document.getElementById('acc-legend');
+  if (checkedCount > 0) {
+    btn.style.display = 'inline'; btn.textContent = 'Delete ' + checkedCount + ' selected';
+    if (legend) legend.style.display = 'none';
+  } else {
+    btn.style.display = 'none';
+    if (legend) legend.style.display = '';
+  }
+}
+
+// ─── Training row ─────────────────────────────────────────────────
+function showTrainingRow(elapsed) {
+  var existing = document.querySelector('.training-row');
+  if (existing && trainingPollTimer) {
+    if (elapsed > 0) {
+      var ts = existing.querySelector('.train-elapsed');
+      if (ts) ts.innerHTML = formatDuration(elapsed);
+    }
+    return;
+  }
+  if (trainingPollTimer) { clearTimeout(trainingPollTimer); trainingPollTimer = null; }
+  var c = document.getElementById('models-content');
+  if (!c) return;
+  for (var i = 0; i < c.children.length; i++) {
+    var el = c.children[i];
+    if (el.tagName === 'DIV' && el.textContent.indexOf('No trained models') >= 0) { el.style.display = 'none'; break; }
+  }
+  if (!existing) {
+    var bar = document.createElement('div');
+    bar.className = 'training-row';
+    bar.style.cssText = 'display:flex;align-items:center;gap:0.75rem;padding:0.5rem 0;border-top:1px solid #2a2a3a';
+    bar.innerHTML = '<span style="color:#60a5fa;font-size:0.75rem;white-space:nowrap"><span class="pulse-gear">&#9881;</span> Training</span> <span class="train-elapsed" style="color:#555;font-size:0.7rem;white-space:nowrap;font-family:monospace">' + (elapsed > 0 ? formatDuration(elapsed) : '<span style="color:#555;animation:pulse 1.5s ease-in-out infinite">starting\u2026</span>') + '</span> <a href="#" class="cancel-train-btn" style="color:#e05a5a;font-size:0.7rem;text-decoration:none;white-space:nowrap">Cancel</a>';
+    c.appendChild(bar);
+    bar.querySelector('.cancel-train-btn').addEventListener('click', function(e) {
+      e.preventDefault();
+      if (!confirm('Cancel training?')) return;
+      fetch('/api/models/train/cancel', { method: 'POST' });
+      if (trainingPollTimer) { clearTimeout(trainingPollTimer); trainingPollTimer = null; }
+      _isTraining = false; modelsLoaded = false; loadModels();
+    });
+  }
+  trainingPollTimer = setTimeout(function poll() {
+    fetch('/api/models/train/status').then(function(r) { return r.json(); }).then(function(s) {
+      if (s.status === 'running') {
+        var ts = document.querySelector('.train-elapsed');
+        if (ts && s.elapsed > 0) ts.innerHTML = formatDuration(s.elapsed);
+        trainingPollTimer = setTimeout(poll, 2000);
+      }
+    });
+  }, 2000);
+}
+
+// ─── Init ─────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', function() {
+  updateRouteLabels();
+  loadModels();
+  if (document.getElementById('cluster-nodes')) loadCluster();
+});
+</script>
+
+{% endblock %}
+
+{% block arch %}
+<div class="tab-carousel" id="tab-carousel">
+  <div id="tab-arch" class="tab-panel">
+    <div style="font-size:0.75rem;color:#888;margin-bottom:0.5rem;text-transform:uppercase;letter-spacing:0.5px;font-weight:500">Architecture</div>
+    <svg viewBox="0 0 380 380" width="100%" style="overflow:visible">
+      <defs>
+        <marker id="arrow" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M0 0 L8 4 L0 8z" fill="currentColor"/>
+        </marker>
+      </defs>
+      <rect x="0" y="0" width="380" height="380" rx="10" fill="none" stroke="#444" stroke-width="1.5" stroke-dasharray="5,4"/>
+      <text x="14" y="20" fill="#888" font-size="11" font-family="inherit" font-weight="500">Docker</text>
+
+      <rect id="sv-spark" x="60" y="48" width="180" height="40" rx="6" fill="#1e1e2a" stroke="#fdc41b" stroke-width="2" class="sv-node"/>
+      <text x="150" y="68" fill="#d0d0d8" font-size="12" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">SPARK</text>
+
+      <rect id="sv-kafka-l" x="70" y="163" width="80" height="36" rx="6" fill="#1e1e2a" stroke="#9c36b5" stroke-width="2" class="sv-node"/>
+      <text x="110" y="181" fill="#d0d0d8" font-size="11" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">KAFKA</text>
+
+      <rect id="sv-kafka-r" x="160" y="163" width="80" height="36" rx="6" fill="#1e1e2a" stroke="#9c36b5" stroke-width="2" class="sv-node"/>
+      <text x="200" y="181" fill="#d0d0d8" font-size="11" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">KAFKA</text>
+
+      <rect x="58" y="150" width="194" height="62" rx="8" fill="none" stroke="#555" stroke-width="1" stroke-dasharray="3,3"/>
+
+      <rect id="sv-bbdd" x="270" y="163" width="80" height="36" rx="6" fill="#1e1e2a" stroke="#2f9e44" stroke-width="2" class="sv-node"/>
+      <text x="310" y="181" fill="#d0d0d8" font-size="10" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">CASSANDRA</text>
+
+      <rect id="sv-flask" x="60" y="280" width="180" height="40" rx="6" fill="#1e1e2a" stroke="#1971c2" stroke-width="2" class="sv-node"/>
+      <text x="150" y="300" fill="#d0d0d8" font-size="12" font-family="inherit" text-anchor="middle" dominant-baseline="middle" font-weight="600">FLASK</text>
+
+      <rect x="130" y="344" width="120" height="18" rx="4" fill="#1e1e2a" stroke="#2a2a3a" stroke-width="1"/>
+      <rect x="140" y="350" width="7" height="7" rx="2" fill="#60a5fa"/>
+      <text x="153" y="356" fill="#888" font-size="9" font-family="inherit">active</text>
+      <rect x="193" y="350" width="7" height="7" rx="2" fill="#22c55e"/>
+      <text x="206" y="356" fill="#888" font-size="9" font-family="inherit">done</text>
+
+      <g id="sv-a0" class="sv-arrow">
+        <path d="M 110 280 L 110 204" fill="none" stroke-width="5"/>
+        <polygon points="110,198 104,208 116,208"/>
+      </g>
+      <g id="sv-a1" class="sv-arrow">
+        <path d="M 110 163 L 110 93" fill="none" stroke-width="5"/>
+        <polygon points="110,87 104,97 116,97"/>
+      </g>
+      <g id="sv-a2" class="sv-arrow">
+        <path d="M 200 88 L 200 158" fill="none" stroke-width="5"/>
+        <polygon points="200,164 194,154 206,154"/>
+      </g>
+      <g id="sv-a3" class="sv-arrow">
+        <path d="M 240 181 L 270 181" fill="none" stroke-width="5"/>
+        <polygon points="276,181 266,175 266,187"/>
+      </g>
+      <g id="sv-a4" class="sv-arrow">
+        <path d="M 200 199 L 200 275" fill="none" stroke-width="5"/>
+        <polygon points="200,281 194,271 206,271"/>
+      </g>
+    </svg>
+  </div>
+
+  <div id="tab-models" class="tab-panel">
+    <div style="font-size:0.75rem;color:#888;margin-bottom:0.5rem;text-transform:uppercase;letter-spacing:0.5px;font-weight:500">Models</div>
+    <div id="models-loading" style="text-align:center;padding:2rem;color:#555;font-size:0.85rem">Loading models...</div>
+    <div id="models-content" style="display:none"></div>
+  </div>
+
+</div>
+
+<div class="tab-dots">
+  <span class="dot active" data-index="0"></span>
+  <span class="dot" data-index="1"></span>
+</div>
+
+<!-- Train modal -->
+<div id="train-modal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:#00000080;z-index:1000;justify-content:center;align-items:center">
+  <div style="background:#1e1e2a;border:1px solid #2a2a3a;border-radius:10px;padding:1.2rem;width:360px;max-height:90vh;overflow-y:auto">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+      <span style="color:#d0d0d8;font-size:0.9rem;font-weight:600">Train <input type="text" id="model-name-input" value="rf_training" oninput="this.value=this.value.replace(/ /g,'_')" style="background:#16161e;border:1px solid #2a2a3a;color:#d0d0d8;padding:0.15rem 0.4rem;border-radius:4px;font-size:0.85rem;outline:none;width:160px;font-family:inherit;font-weight:600"></span>
+      <span id="modal-close" style="color:#888;cursor:pointer;font-size:1.1rem">&times;</span>
+    </div>
+    <label style="display:block;font-size:0.7rem;color:#888;margin-bottom:0.2rem">Trees <span id="trees-val" style="color:#60a5fa;font-weight:600">20</span></label>
+    <input type="range" id="slider-trees" min="1" max="100" value="20" style="width:100%;margin-bottom:0.5rem">
+    <label style="display:block;font-size:0.7rem;color:#888;margin-bottom:0.2rem">Max Depth <span id="depth-val" style="color:#60a5fa;font-weight:600">10</span></label>
+    <input type="range" id="slider-depth" min="1" max="30" value="10" style="width:100%;margin-bottom:0.75rem">
+    <button id="start-train-btn" style="width:100%;background:#2563eb;color:#fff;border:none;padding:0.5rem;border-radius:6px;font-size:0.85rem;font-weight:600;cursor:pointer">Start Training</button>
+  </div>
+</div>
+
+<script>
+// ─── Carousel navigation ─────────────────────────────────────────────
+var carousel = document.getElementById('tab-carousel');
+document.querySelectorAll('.tab-dots .dot').forEach(function(dot) {
+  dot.addEventListener('click', function() {
+    carousel.scrollTo({ left: parseInt(this.dataset.index) * carousel.clientWidth, behavior: 'smooth' });
+  });
+});
+carousel.addEventListener('scroll', function() {
+  var idx = Math.round(this.scrollLeft / this.clientWidth);
+  document.querySelectorAll('.tab-dots .dot').forEach(function(d, i) { d.classList.toggle('active', i === idx); });
+});
+
+// ─── Training modal controls ─────────────────────────────────────────
+document.getElementById('modal-close').addEventListener('click', function() {
+  document.getElementById('train-modal').style.display = 'none';
+});
+document.getElementById('train-modal').addEventListener('click', function(e) {
+  if (e.target === this) this.style.display = 'none';
+});
+document.getElementById('slider-trees').addEventListener('input', function() {
+  document.getElementById('trees-val').textContent = this.value;
+});
+document.getElementById('slider-depth').addEventListener('input', function() {
+  document.getElementById('depth-val').textContent = this.value;
+});
+document.getElementById('start-train-btn').addEventListener('click', function() {
+  var btn = this;
+  btn.disabled = true;
+  btn.textContent = 'Starting...';
+  var hp = {
+    num_trees: parseInt(document.getElementById('slider-trees').value) || 20,
+    max_depth: parseInt(document.getElementById('slider-depth').value) || 10,
+    run_name: document.getElementById('model-name-input').value.trim() || 'rf_training'
+  };
+  fetch('/api/models/train', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(hp)
+  }).then(function(r) { return r.json(); }).then(function(data) {
+    btn.disabled = false;
+    btn.textContent = 'Start Training';
+    if (data.status === 'already_running') { alert('A training job is already running.'); return; }
+    document.getElementById('train-modal').style.display = 'none';
+    _pendingTrainingRow = true;
+    loadModels();
+  }).catch(function(err) {
+    btn.disabled = false;
+    btn.textContent = 'Start Training';
+    alert('Training request failed: ' + err);
+  });
+});
+
+// ─── Pull modal ──────────────────────────────────────────────────────
+document.getElementById('pull-close').addEventListener('click', function() {
+  document.getElementById('pull-modal').style.display = 'none';
+});
+document.getElementById('pull-modal').addEventListener('click', function(e) {
+  if (e.target === this) this.style.display = 'none';
+});
+</script>
+{% endblock %}

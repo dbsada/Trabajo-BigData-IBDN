@@ -1,9 +1,8 @@
 FROM apache/airflow:latest-python3.12
 
 USER root
-RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz | \
-    tar xz -C /usr/local/bin --strip-components=1 docker/docker && \
-    chmod +x /usr/local/bin/docker && \
-    groupadd -g 1001 docker && usermod -aG docker airflow
+RUN apt-get update && apt-get install -y curl python3-pip && rm -rf /var/lib/apt/lists/*
 USER airflow
-RUN pip install --no-cache-dir apache-airflow-providers-http docker mlflow boto3
+
+COPY requirements.txt /tmp/
+RUN pip install --no-cache-dir mlflow boto3 apache-airflow-providers-http

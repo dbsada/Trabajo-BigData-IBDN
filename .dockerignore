@@ -1,4 +1,14 @@
 data/
+models/
 env/
 *.log
 .git/
+__pycache__/
+.DS_Store
+spark-jobs/target/
+spark-jobs/project/target/
+node_modules/
+.venv/
+*.swp
+*.swo
+
