@@ -4,7 +4,7 @@ carga de datos inicial, y lanzamiento del job de predicción.
 
 Uso:
     python3 start.py                # Despliegue local con Docker
-    python3 start.py --skip-build   # Despliegue local omitiendo la fase de build
+    python3 start.py --build        # Despliegue local incluyendo la fase de build
     python3 start.py --stop         # Detener y limpiar contenedores y volúmenes
 """
 
@@ -133,7 +133,7 @@ def start_prediction():
 # DOCKER
 # ═══════════════════════════════════════════════════════════════
 
-def deploy_docker(skip_build=False):
+def deploy_docker(build=True):
     log("=== Despliegue Docker ===")
     compile_jar()
     # Bajar contenedores previos (project name explícito para evitar conflictos)
@@ -141,7 +141,7 @@ def deploy_docker(skip_build=False):
     # También limpiar contenedores huérfanos de project names anteriores
     run("docker rm -f $(docker ps -aq --filter name=bd-a-mano) 2>/dev/null || true", timeout=30, quiet=True)
 
-    if not skip_build:
+    if build:
         # Construir spark-base primero (imagen pesada compartida por manager y worker)
         log("Construyendo imagen base Spark (spark-base:4.1.1)...")
         r = subprocess.run("docker build -t spark-base:4.1.1 -f docker/dockerfile.spark-base .", shell=True, timeout=10000)
@@ -164,7 +164,7 @@ def deploy_docker(skip_build=False):
                 log(f"❌ Build de {service} falló.")
                 sys.exit(1)
     else:
-        log("Omitiendo builds (--skip-build)...")
+        log("Omitiendo builds...")
 
     # Arrancar contenedores (sin timeout — compose retorna cuando los contenedores están creados)
     subprocess.run("docker-compose up -d", shell=True, timeout=600)
@@ -191,6 +191,6 @@ if __name__ == "__main__":
         log("✅ Todo detenido y volúmenes eliminados")
         sys.exit(0)
 
-    skip_build = "--skip-build" in sys.argv
+    build = "--build" in sys.argv
     print('Iniciando despliegue...')
-    deploy_docker(skip_build)
+    deploy_docker(build)
