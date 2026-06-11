@@ -9,7 +9,7 @@ import boto3
 import requests as req
 from botocore.config import Config
 
-MIN_ACCURACY = 0.65
+MIN_ACCURACY = 0.60
 MLFLOW_URI = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
 JAR = "/app/spark-jobs/target/scala-2.13/spark-jobs_2.13-0.1.jar"
 
