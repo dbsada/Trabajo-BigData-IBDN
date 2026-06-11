@@ -62,6 +62,7 @@ def _train_model(**context):
         f"--conf 'spark.hadoop.fs.s3a.access.key={access_key}' "
         f"--conf 'spark.hadoop.fs.s3a.secret.key={secret_key}' "
         f"--conf spark.hadoop.fs.s3a.path.style.access=true "
+        f"--conf spark.hadoop.fs.s3a.connection.ssl.enabled=false "
         f"--conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions "
         f"--conf spark.sql.catalog.lakehouse=org.apache.iceberg.spark.SparkCatalog "
         f"--conf spark.sql.catalog.lakehouse.type=hadoop "

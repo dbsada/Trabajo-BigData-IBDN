@@ -97,11 +97,13 @@ socket.on('training_update', function(data) {
       setTimeout(function() { row.remove(); loadModels(); }, 1500);
     }
     _isTraining = false;
+    _pendingTrainingRow = false;
     checkActiveModel();
   } else if (data.status === 'cancelled') {
     var row = document.querySelector('.training-row');
     if (row) row.remove();
     _isTraining = false;
+    _pendingTrainingRow = false;
     loadModels();
     checkActiveModel();
   } else if (data.status === 'failed') {
@@ -110,6 +112,7 @@ socket.on('training_update', function(data) {
       row.innerHTML = '<span style="color:#e05a5a;font-size:0.75rem">Training failed: ' + (data.error || 'unknown') + '</span>';
     }
     _isTraining = false;
+    _pendingTrainingRow = false;
     checkActiveModel();
   }
 });
@@ -237,8 +240,11 @@ function showResult(data) {
   $("#predict-btn").prop('disabled', false).text('Predict');
   var rl = document.getElementById('result-list');
   if (!rl) return;
-  var delayClass = data.Prediction === 0 ? 'ON_TIME' : 'DELAYED';
-  var color = data.Prediction === 0 ? '#22c55e' : '#e05a5a';
+  var labels = ['Very early', 'Early', 'Late', 'Very late'];
+  var colors = ['#22c55e', '#84cc16', '#eab308', '#ef4444'];
+  var pred = Math.min(Math.max(parseInt(data.Prediction) || 0, 0), 3);
+  var delayClass = labels[pred];
+  var color = colors[pred];
   var mName = data.model_id ? (modelNameMap[data.model_id] || data.model_id.slice(0,8)) : '';
   var html = '<div style="color:' + color + ';font-weight:700;font-size:1rem;margin-bottom:0.2rem">'
     + delayClass

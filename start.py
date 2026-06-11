@@ -85,8 +85,7 @@ def data_pipeline(kexec_prefix, is_docker=True):
     run(f'{mc} sh -c "mkdir -p /tmp/data && mc alias set local http://localhost:9000 {_MINIO_USER} {_MINIO_PASSWORD}" 2>/dev/null',
         quiet=True)
     for fname in ["simple_flight_delay_features.jsonl.bz2", "origin_dest_distances.jsonl"]:
-        run(f'{kexec_prefix} sh -c "cat /app/data/{fname}" | {mc} -i sh -c "cat > /tmp/data/{fname}"',
-            timeout=60)
+        run(f'docker cp -q data/{fname} minio:/tmp/data/{fname}', timeout=60)
         run(f'{mc} mc cp /tmp/data/{fname} local/lakehouse/raw/', quiet=True)
 
     for topic in [_TOPIC_IN, _TOPIC_OUT]:

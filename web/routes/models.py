@@ -302,8 +302,10 @@ def _build_spark_props_json():
         '"spark.sql.defaultCatalog":"lakehouse"',
         '"spark.hadoop.fs.s3a.path.style.access":"true"',
         '"spark.hadoop.fs.s3a.list.version":"1"',
+        '"spark.hadoop.fs.s3a.connection.ssl.enabled":"false"',
         f'"spark.driverEnv.MLFLOW_TRACKING_URI":"{MLFLOW_URI}"',
         f'"spark.executorEnv.MLFLOW_TRACKING_URI":"{MLFLOW_URI}"',
+        '"spark.driver.extraJavaOptions":"--add-opens=java.base/sun.util.calendar=ALL-UNNAMED"',
     ]
     return ",".join(conf_items)
 
@@ -413,14 +415,18 @@ def _run_training(num_trees, max_depth, run_name):
             timeout=10,
         )
         sub_data = resp.json()
+        if not sub_data.get("success", False):
+            raise Exception(f"Spark submission failed: {sub_data.get('message', sub_data)}")
         _training_app_id = sub_data.get("submissionId")
+        print(f"Spark submission accepted: {_training_app_id}")
 
         while _training_active:
             status_resp = requests.get(
                 f"http://spark-manager:6066/v1/submissions/status/{_training_app_id}",
                 timeout=5,
             )
-            s = status_resp.json().get("driverState", "")
+            status_json = status_resp.json()
+            s = status_json.get("driverState", "")
             if s in ("FINISHED", "FAILED", "KILLED"):
                 if s == "FINISHED":
                     version = _find_latest_model_in_minio()
@@ -428,7 +434,8 @@ def _run_training(num_trees, max_depth, run_name):
                         dur = int(time.time() - _training_start_time)
                         model_version = _register_mlflow_run(version, run_name, num_trees, max_depth, dur)
                 elif s == "FAILED":
-                    raise Exception("Spark training job failed")
+                    error_msg = status_json.get("message", "Spark training job failed")
+                    raise Exception(f"Spark training job failed: {error_msg}")
                 break
             elapsed = int(time.time() - _training_start_time)
             _emit_training({"status": "running", "elapsed": elapsed, "run_name": run_name})

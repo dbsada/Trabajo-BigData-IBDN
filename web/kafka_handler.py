@@ -48,7 +48,7 @@ def send_prediction(form_data: dict, model_ids: list) -> str:
     prediction.update(date_fields)
     prediction["Timestamp"] = utils.get_current_timestamp()
     prediction["UUID"] = unique_id
-    prediction["model_ids"] = model_ids
+    prediction["model_ids"] = json.dumps(model_ids)
 
     for key in ["FlightNum", "Carrier"]:
         if prediction.get(key) is None:
