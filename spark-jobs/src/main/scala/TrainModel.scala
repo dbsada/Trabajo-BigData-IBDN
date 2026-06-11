@@ -191,7 +191,8 @@ object TrainModel {
     println(s"Model saved to $modelPath")
 
     // Guardar precisión en MinIO para que Python pueda leerla ------------------
-    val jsonStr = s"""{"accuracy":$accuracy,"model_version":"$modelVersion","num_trees":$numTrees,"max_depth":$maxDepth}"""
+    val duration = (System.currentTimeMillis() - startTime) / 1000
+    val jsonStr = s"""{"accuracy":$accuracy,"model_version":"$modelVersion","num_trees":$numTrees,"max_depth":$maxDepth,"training_duration_seconds":$duration,"run_name":"$runName"}"""
     val conf = spark.sparkContext.hadoopConfiguration
     val fs = new java.net.URI("s3a://lakehouse")
     val outStream = org.apache.hadoop.fs.FileSystem.get(fs, conf)
@@ -210,7 +211,6 @@ object TrainModel {
     // --------------------------------------------------------------------------
     // --------------------------------------------------------------------------
 
-    val duration = (System.currentTimeMillis() - startTime) / 1000
     println(s"Training completed in ${duration}s")
     println(s"RUN_NAME=$runName") 
     println(s"MODEL_VERSION=$modelVersion") 

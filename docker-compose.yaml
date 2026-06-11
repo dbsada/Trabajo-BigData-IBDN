@@ -231,7 +231,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
+          memory: 1G
 
   airflow-dag-processor:
     build:
@@ -255,7 +255,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
+          memory: 1G
 
 volumes:
   kafka_data:

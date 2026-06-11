@@ -30,15 +30,17 @@ def _get_minio():
 
 def _wait_for_spark(**context):
     """Wait for Spark master to be ready."""
+    import urllib.request
     for _ in range(48):
-        r = subprocess.run(
-            ["curl", "-s", "--connect-timeout", "3", "--max-time", "5",
-             "http://spark-manager:8080/json/"],
-            capture_output=True, text=True, timeout=10)
-        if r.returncode == 0:
-            print("Spark master is ready")
-            _time.sleep(5)
-            return
+        try:
+            r = urllib.request.urlopen(
+                "http://spark-manager:8080/json/", timeout=5)
+            if r.status == 200:
+                print("Spark master is ready")
+                _time.sleep(5)
+                return
+        except Exception:
+            pass
         _time.sleep(3)
     raise Exception("Spark master did not become ready within 2.5 minutes")
 
@@ -52,6 +54,7 @@ def _train_model(**context):
     num_trees = conf.get("num_trees", 20)
     max_depth = conf.get("max_depth", 10)
     run_name = conf.get("run_name", "").strip() or "rf_training"
+    run_id = context["dag_run"].run_id.replace(":", "_").replace("+", "_")
 
     print(f"Training: num_trees={num_trees}, max_depth={max_depth}, run_name={run_name}")
 
@@ -167,7 +170,7 @@ def _check_and_register(**context):
     now_ms = int(_time.time() * 1000)
     resp = req.post(
         f"{MLFLOW_URI}/api/2.0/mlflow/runs/create",
-        json={"experiment_id": "0", "start_time": now_ms, "run_name": run_name[:8]},
+        json={"experiment_id": "0", "start_time": now_ms, "run_name": run_name},
         timeout=5,
     )
     run_id = resp.json()["run"]["info"]["run_id"]
