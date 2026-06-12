@@ -37,7 +37,7 @@ La arqutitectura de la aplicación se compone de varios servicios que interactú
 ![Arquitectura](images/arquitectura.png)
 
 > [!NOTE]
-> Puedes ver todas los detalles de la arquitectura en [este documento](arquitectura.pdf).
+> Puedes ver todos los detalles de la arquitectura en [este documento](arquitectura.pdf).
 
 ## Autores:
 - [Diego Besada](https://github.com/dbsada)
